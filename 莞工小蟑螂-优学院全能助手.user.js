@@ -1,6 +1,7 @@
 // ==UserScript==
 // @name         莞工小蟑螂 - 优学院全能助手
-// @version      3.3.2
+// @namespace    https://github.com/xz-ulearning-helper
+// @version      3.4.5
 // @description  优学院课件题库导出 + 训练题库导出 + 自动静音播放/答题/翻页，莞工小蟑螂出品
 // @author       莞工小蟑螂
 // @match        https://ua.dgut.edu.cn/*
@@ -11,6 +12,8 @@
 // @grant        GM_xmlhttpRequest
 // @license      MIT
 // @run-at       document-idle
+// @homepageURL  https://github.com/xz-ulearning-helper
+// @supportURL   https://github.com/xz-ulearning-helper/issues
 // ==/UserScript==
 
 (function () {
@@ -34,6 +37,12 @@
   function notify(t){try{GM_notification({text:t,title:'莞工小蟑螂',timeout:4000})}catch(e){alert(t)}}
   function getCookie(n){for(var i=0;i<document.cookie.split(';').length;i++){var p=document.cookie.split(';')[i].trim();if(p.indexOf(n+'=')===0)return decodeURIComponent(p.slice(n.length+1));}return'';}
 
+  // ==================== 统一定时器 ====================
+  var timerRegistry={_timers:{},_id:0,set:function(fn,delay){var id=++this._id;var self=this;this._timers[id]=setTimeout(function(){delete self._timers[id];fn();},delay);return id;},clear:function(id){if(this._timers[id]){clearTimeout(this._timers[id]);delete this._timers[id];}},clearAll:function(){for(var id in this._timers){clearTimeout(this._timers[id]);}this._timers={};}};
+
+  // 配置缓存
+  var _cfgCache=null;
+
   // ==================== 认证 ====================
   var authHeaders={};
   var origFetch=window.fetch;
@@ -43,7 +52,7 @@
     retries=retries||3;
     var url=API_HOST+path;
     console.log('[小蟑螂] API请求:',method,url);
-    
+
     // 使用 GM_xmlhttpRequest 绕过 CORS
     function gmRequest(opts){
       return new Promise(function(resolve,reject){
@@ -52,6 +61,7 @@
           url:opts.url,
           headers:opts.headers||{},
           data:opts.data||null,
+          timeout:30000,
           onload:function(res){
             console.log('[小蟑螂] GM响应:',res.status,opts.url);
             if(res.status>=200&&res.status<300){
@@ -60,15 +70,16 @@
               reject(new Error('HTTP '+res.status));
             }
           },
-          onerror:function(e){reject(new Error('网络错误'));}
+          onerror:function(e){reject(new Error('网络错误'));},
+          ontimeout:function(){reject(new Error('请求超时'));}
         });
       });
     }
-    
+
     var headers={'Content-Type':'application/json'};
     var auth=getCookie('AUTHORIZATION')||getCookie('token')||'';
     if(auth)headers['Authorization']=auth.includes('.')?'Bearer '+auth:auth;
-    
+
     for(var attempt=1;attempt<=retries;attempt++){
       try{
         var data=await gmRequest({method:method,url:url,headers:headers,data:body?JSON.stringify(body):null});
@@ -274,17 +285,12 @@
       console.log('[小蟑螂] 尝试DGUT API: /uaapi/course/stu/'+courseId+'/directory');
       dirResp=await api('GET','/uaapi/course/stu/'+encodeURIComponent(courseId)+'/directory'+(classId?'?classId='+encodeURIComponent(classId):''));
     }else{
-      // 旧版优学院 - 试听模式不需要登录
-      console.log('[小蟑螂] 尝试API: /course/all/'+courseId+'/directory');
-      try{
-        dirResp=await api('GET','/course/all/'+encodeURIComponent(courseId)+'/directory');
-        console.log('[小蟑螂] API 响应:',dirResp?JSON.stringify(dirResp).slice(0,200):'null');
-      }catch(e){
-        console.log('[小蟑螂] API 失败:',e.message,e.stack);
-      }
-      if(!dirResp||(!dirResp.success&&!dirResp.data&&!dirResp.chapters)){
-        console.log('[小蟑螂] 尝试API: /course/'+courseId+'/directory');
-        try{dirResp=await api('GET','/course/'+encodeURIComponent(courseId)+'/directory');}catch(e){console.log('[小蟑螂] API 失败:',e.message);}
+      // 标准优学院 - POST 接口
+      console.log('[小蟑螂] 尝试API: POST /api/v2/learnCourse/courseDirectory');
+      try{dirResp=await api('POST','/api/v2/learnCourse/courseDirectory',{courseId:courseId,classId:classId});}catch(e){console.log('[小蟑螂] API失败:',e.message);}
+      if(!dirResp||(!dirResp.success&&!dirResp.data)){
+        console.log('[小蟑螂] 尝试API: POST /learnCourse/courseDirectory');
+        try{dirResp=await api('POST','/learnCourse/courseDirectory',{courseId:courseId,classId:classId});}catch(e){console.log('[小蟑螂] API失败:',e.message);}
       }
     }
     console.log('[小蟑螂] 目录响应:',dirResp?JSON.stringify(dirResp).slice(0,500):'null');
@@ -311,71 +317,53 @@
     }
     if(!chapters.length)throw new Error('课程目录为空');
 
-    setStatus('正在解析页面列表...');
-    // 从目录数据中直接提取页面（旧版优学院的目录API已经包含所有页面信息）
+    setStatus('正在获取页面列表...');
+    var fetchedNodeIds={};
     for(var ci=0;ci<chapters.length;ci++){
+      if(exportCancelled)throw new Error('用户取消导出');
       var ch=chapters[ci];
-      // 在目录数据中找到对应的章节
-      for(var di=0;di<(dirData.chapters||[]).length;di++){
-        var dirCh=dirData.chapters[di];
-        if(dirCh.nodeid===ch.nodeId){
-          // 遍历该章节的所有小节
-          for(var ii=0;ii<(dirCh.items||[]).length;ii++){
-            var item=dirCh.items[ii];
-            if(item.itemid===ch.itemId||item.id===ch.itemId){
-              // 提取该小节的所有页面
-              var pages=[];
-              for(var pi=0;pi<(item.coursepages||[]).length;pi++){
-                var cp=item.coursepages[pi];
-                pages.push({
-                  title:cp.title||'页面',
-                  contentType:cp.contentType||0,
-                  id:cp.id||cp.relationid,
-                  coursepageDTOList:[]
-                });
-              }
-              ch.pages=pages;
-              console.log('[小蟑螂] 小节 "'+ch.title+'" 有 '+pages.length+' 个页面');
-              break;
-            }
+      var chId=ch.nodeId;
+      if(!chId||fetchedNodeIds[chId])continue;
+      fetchedNodeIds[chId]=true;
+      setProgress(Math.round(ci/chapters.length*30),'获取章节数据 '+(ci+1)+'/'+chapters.length+'...');
+      console.log('[小蟑螂] 获取章节:',ch.title,'nodeId='+chId);
+      var chResp;
+      if(IS_DGUT)chResp=await api('GET','/uaapi/wholepage/chapter/stu/'+encodeURIComponent(chId));
+      else{chResp=await api('POST','/api/v2/learnCourse/getWholeChapterPageContent',{nodeId:chId});if(!chResp||!chResp.data)chResp=await api('POST','/learnCourse/getWholeChapterPageContent',{nodeId:chId});}
+      if(!chResp){console.log('[小蟑螂] 章节响应为空:',ch.title);continue;}
+      var cd=chResp.data||chResp;
+      var items=cd.wholepageItemDTOList||cd.items||[];
+      console.log('[小蟑螂] 章节items数量:',items.length);
+      for(var ii=0;ii<items.length;ii++){
+        var item=items[ii];
+        var wpList=item.wholepageDTOList||item.coursepages||[];
+        var sectionPages=[];
+        for(var wi=0;wi<wpList.length;wi++){
+          var wp=wpList[wi];
+          sectionPages.push({title:wp.content||wp.title||wp.name||'页面',contentType:wp.contentType||wp.type||0,id:wp.id||wp.relationid||wp.pageId,coursepageDTOList:wp.coursepageDTOList||wp.children||[]});
+        }
+        for(var ci2=0;ci2<chapters.length;ci2++){
+          if(chapters[ci2].nodeId===chId&&(chapters[ci2].itemId===item.itemid||chapters[ci2].itemId===item.id)){
+            chapters[ci2].pages=sectionPages;
+            console.log('[小蟑螂] 匹配成功:',chapters[ci2].title,'页面数:',sectionPages.length);
+            break;
           }
-          break;
         }
       }
+      await wait(100);
     }
 
     var totalQuizPages=0;
     chapters.forEach(function(ch){
       var qPages=ch.pages.filter(function(p){return p.contentType===7});
       totalQuizPages+=qPages.length;
+      if(qPages.length){
+        var qCount=0;qPages.forEach(function(p){(p.coursepageDTOList||[]).forEach(function(cp){qCount+=getQs(cp).length;});});
+        console.log('[小蟑螂] '+ch.title+': '+qPages.length+' 个练习页, '+qCount+' 道题');
+      }
     });
     console.log('[小蟑螂] 共找到 '+totalQuizPages+' 个练习页面');
     if(!totalQuizPages)throw new Error('课程中没有找到练习页面');
-
-    // 获取每个练习页面的题目数据
-    setStatus('正在获取题目数据...');
-    var fetchedPages={};
-    for(var ci=0;ci<chapters.length;ci++){
-      var ch=chapters[ci];
-      for(var pi=0;pi<ch.pages.length;pi++){
-        var pg=ch.pages[pi];
-        if(pg.contentType!==7||!pg.id||fetchedPages[pg.id])continue;
-        fetchedPages[pg.id]=true;
-        console.log('[小蟑螂] 获取页面题目: '+pg.title+' (id:'+pg.id+')');
-        try{
-          var pageResp=await api('GET','/wholepage/all/'+encodeURIComponent(pg.id));
-          if(pageResp&&pageResp.coursepageDTOList){
-            pg.coursepageDTOList=pageResp.coursepageDTOList;
-            var qCount=0;
-            pageResp.coursepageDTOList.forEach(function(cp){qCount+=getQs(cp).length;});
-            console.log('[小蟑螂] 页面 "'+pg.title+'" 有 '+qCount+' 道题');
-          }
-        }catch(e){
-          console.log('[小蟑螂] 获取页面失败:',pg.title,e.message);
-        }
-        await wait(100);
-      }
-    }
 
     setStatus('请选择要导出的课件...');
     var selected;
@@ -562,12 +550,11 @@
     maxRetry: 7,
     accuracyMin: 100,
     accuracyMax: 100,
-    answerDelay: 500,
-    targetChapter: '',
-    targetSection: ''
+    answerDelay: 500
   };
 
-  function getCfg(){var c=loadCfg();for(var k in defaultCfg){if(typeof c[k]==='undefined')c[k]=defaultCfg[k];}return c;}
+  function getCfg(){if(!_cfgCache){_cfgCache=loadCfg();for(var k in defaultCfg){if(typeof _cfgCache[k]==='undefined')_cfgCache[k]=defaultCfg[k];}}return _cfgCache;}
+  function refreshCfg(){_cfgCache=null;return getCfg();}
 
   function parseAccuracy(str){
     str=String(str||'').trim();
@@ -591,30 +578,98 @@
     return(r.min+Math.random()*(r.max-r.min))/100;
   }
 
+  // 视频状态跟踪
+  var _videoStates = [];
+  var _noVideoTimerId = null;
+  var _videoObserver = null;
+
+  // 用 MutationObserver 监听页面变化，比轮询更高效
+  function setupVideoObserver() {
+    if (_videoObserver) return;
+    _videoObserver = new MutationObserver(function() {
+      if (autoState.paused || autoState.navigating || autoState.answerInProgress) return;
+      autoProcessVideos();
+      autoCheckModals();
+    });
+    var target = document.querySelector('.course-container') || document.querySelector('#course-container') || document.body;
+    _videoObserver.observe(target, { childList: true, subtree: true });
+  }
+
   function autoProcessVideos() {
     if (autoState.paused || autoState.navigating || autoState.answerInProgress) return;
     var cfg = getCfg();
     if (!cfg.autoPlay) return;
 
     var videos = document.querySelectorAll('video');
-    var hasVideo = false;
-    videos.forEach(function(v) {
-      if (!v.src && !v.currentSrc) return;
-      hasVideo = true;
-      v.playbackRate = cfg.rate;
-      if (cfg.autoMute && !v.muted) v.muted = true;
-      if (v.paused) v.play().catch(function(){});
-      v.onended = function() {
-        Logger.log('视频播放完毕，停留 '+cfg.stayTime+' 秒后翻页');
-        setTimeout(function(){ autoGoNext(); }, cfg.stayTime * 1000);
-      };
-    });
-
-    if (!hasVideo) {
-      // 没有视频，可能当前页是纯文字/测验
-      Logger.log('当前页无视频，'+cfg.stayTime+' 秒后尝试翻页');
-      setTimeout(function(){ autoGoNext(); }, cfg.stayTime * 1000);
+    if (videos.length === 0) {
+      if (_noVideoTimerId) return;
+      Logger.log('当前页无视频，'+cfg.stayTime+' 秒后翻页');
+      _noVideoTimerId = timerRegistry.set(function(){ _noVideoTimerId = null; autoGoNext(); }, cfg.stayTime * 1000);
+      return;
     }
+    _noVideoTimerId = null;
+
+    // 初始化视频状态（仅第一次或视频数量变化时）
+    if (_videoStates.length !== videos.length) {
+      _videoStates = [];
+      videos.forEach(function(v, i) {
+        _videoStates.push({ ele: v, status: false, seek: 0, lastTime: 0 });
+        v.addEventListener('ended', function handler() { _videoStates[i].status = true; v.removeEventListener('ended', handler); }, { once: true });
+      });
+    }
+
+    // 检查 data-bind 属性判断完成状态
+    var statusIndicators = document.querySelectorAll('.video-bottom span:first-child');
+    if (statusIndicators.length > 0 && statusIndicators.length === videos.length) {
+      videos.forEach(function(v, i) {
+        if (i < _videoStates.length) {
+          var bind = statusIndicators[i].getAttribute('data-bind') || '';
+          if (bind.includes('finished')) {
+            _videoStates[i].status = true;
+          }
+        }
+      });
+    }
+
+    videoCtrl();
+  }
+
+  function videoCtrl() {
+    if (autoState.paused || autoState.navigating || autoState.answerInProgress) return;
+    var cfg = getCfg();
+
+    // 如果视频数量变了，重新初始化
+    var videos = document.querySelectorAll('video');
+    if (videos.length !== _videoStates.length) {
+      autoProcessVideos();
+      return;
+    }
+
+    // 找到第一个未完成的视频
+    for (var i = 0; i < _videoStates.length; i++) {
+      var vs = _videoStates[i];
+      if (!vs.status) {
+        var v = vs.ele;
+        if (cfg.autoMute && !v.muted) v.muted = true;
+        if (cfg.autoChangeRate && v.playbackRate !== cfg.rate) v.playbackRate = cfg.rate;
+
+        // 检测视频是否卡住（时间没有前进）
+        if (v.paused || vs.lastTime === v.currentTime) {
+          v.currentTime = Math.max(0, v.currentTime - 3);
+          v.play().catch(function(){});
+          Logger.log('视频卡住，回退3秒重试');
+        }
+        vs.lastTime = v.currentTime;
+
+        // 延迟后继续检查
+        timerRegistry.set(function() { videoCtrl(); }, 500);
+        return;
+      }
+    }
+
+    // 所有视频都完成了，翻页
+    Logger.log('所有视频播放完毕，' + cfg.stayTime + ' 秒后翻页');
+    timerRegistry.set(function() { autoGoNext(); }, cfg.stayTime * 1000);
   }
 
   function autoCheckModals() {
@@ -667,15 +722,18 @@
     function next() {
       if (idx >= qIds.length) {
         Logger.log(qIds.length + ' 道题处理完毕');
-        setTimeout(function() {
-          if (cfg.autoSubmit) {
+        var cfg2 = getCfg();
+        timerRegistry.set(function() {
+          if (cfg2.autoSubmit) {
             var inputs = document.querySelectorAll('textarea, .blank-input');
-            inputs.forEach(function(el) { $(el).trigger('change'); });
+            inputs.forEach(function(el) {
+              el.dispatchEvent(new Event('change', { bubbles: true }));
+            });
             var submit = document.querySelector('.btn-submit');
             if (submit) { submit.click(); Logger.log('已提交答案'); }
           }
           autoState.answerInProgress = false;
-          if (cfg.autoNext) autoGoNext();
+          if (cfg2.autoNext) autoGoNext();
         }, 1000);
         return;
       }
@@ -697,35 +755,75 @@
             var acc = Math.round(getTargetAccuracy()*100);
             Logger.log('题目 '+qId+': 已作答 (目标正确率'+acc+'%)');
           } catch (e) { Logger.log('获取答案失败: '+e.message+'，跳过此题'); }
-          setTimeout(function(){ idx++; next(); }, jitteredDelay(cfg.answerDelay||500));
+          timerRegistry.set(function(){ idx++; next(); }, jitteredDelay(cfg.answerDelay||500));
         },
-        onerror: function() { Logger.log('网络异常，正在重试...'); setTimeout(function(){ idx++; next(); }, jitteredDelay(cfg.answerDelay||800)); }
+        onerror: function() { Logger.log('网络异常，正在重试...'); timerRegistry.set(function(){ idx++; next(); }, jitteredDelay(cfg.answerDelay||800)); }
       });
     }
     next();
   }
 
+  // 选择题：正确答案用ko内部属性绑定，而非只click
+  function _koClick(el) {
+    if (!el) return;
+    // 只点击 checkbox/radio 元素，不点击容器（容器可能触发导航）
+    var cb = el.querySelector('.checkbox, .option-checkbox, .radio');
+    if (cb) {
+      cb.dispatchEvent(new MouseEvent('click', {bubbles: true, cancelable: true}));
+      cb.dispatchEvent(new Event('change', {bubbles: true}));
+    } else {
+      // 如果没有 checkbox，直接点击元素
+      el.dispatchEvent(new MouseEvent('click', {bubbles: true, cancelable: true}));
+      el.dispatchEvent(new Event('change', {bubbles: true}));
+    }
+  }
+
+  function _koSetValue(el, val) {
+    if (!el) return;
+    el.value = val;
+    el.dispatchEvent(new Event('input', {bubbles:true}));
+    el.dispatchEvent(new Event('change', {bubbles:true}));
+    // 尝试触发ko绑定的事件
+    var koCtx = el.__ko__;
+    if (koCtx && koCtx.valueHasMutated) { koCtx.valueHasMutated(); }
+  }
+
   function autoFillAnswer(qId, answers) {
     var el = document.querySelector('#question' + qId);
-    if (!el) return;
+    if (!el) { Logger.log('找不到题目容器: #question' + qId); return; }
     var typeTag = el.querySelector('.question-type-tag');
     var typeText = typeTag ? typeTag.textContent : '';
+    Logger.log('题目容器找到, 类型标签: "' + typeText + '"');
 
     var accuracy = getTargetAccuracy();
     var shouldAnswerCorrect = Math.random() < accuracy;
     autoState.questionsDone++;
     if(shouldAnswerCorrect) autoState.questionsCorrect++;
 
-    if (typeText.includes('选择')) {
+    if (typeText.includes('选')) {
       var opts = el.querySelectorAll('.choice-item, .option-item, .question-option');
-      if (shouldAnswerCorrect) {
+      Logger.log('选择题: 找到 ' + opts.length + ' 个选项, 正确答案: ' + answers.join(','));
+
+      if (opts.length === 0) {
+        Logger.log('未找到标准选项容器，尝试其他选择器...');
+        // 尝试找所有带 data-bind 的元素
+        var bindEls = el.querySelectorAll('[data-bind]');
+        Logger.log('data-bind 元素数: ' + bindEls.length);
+        bindEls.forEach(function(b, i) {
+          if (i < 8) Logger.log('  [' + i + '] ' + b.tagName + ' data-bind=' + b.getAttribute('data-bind').substring(0, 50));
+        });
+        // 尝试找 radio/input
+        var radios = el.querySelectorAll('input[type="radio"], input[type="checkbox"]');
+        Logger.log('radio/checkbox 数: ' + radios.length);
+      }
+
+        if (shouldAnswerCorrect) {
         opts.forEach(function(opt) {
           var label = opt.querySelector('.option') || opt.querySelector('.option-letter') || opt.querySelector('span:first-child');
           if (label) {
             var letter = label.textContent.trim().replace('.', '');
             if (answers.includes(letter)) {
-              var cb = opt.querySelector('.checkbox, .option-checkbox, .radio');
-              if (cb && !cb.classList.contains('selected')) { opt.click(); if (!cb.classList.contains('selected')) cb.click(); }
+              _koClick(opt);
             }
           }
         });
@@ -740,26 +838,35 @@
         });
         if (wrongOpts.length) {
           var pick = wrongOpts[Math.floor(Math.random() * wrongOpts.length)];
-          var cb = pick.querySelector('.checkbox, .option-checkbox, .radio');
-          if (cb && !cb.classList.contains('selected')) { pick.click(); if (!cb.classList.contains('selected')) cb.click(); }
+          _koClick(pick);
         }
       }
     } else if (typeText.includes('判断')) {
       var isCorrect = shouldAnswerCorrect ? (String(answers[0]) === 'true') : (String(answers[0]) !== 'true');
       var btn = el.querySelector(isCorrect ? '.right-btn' : '.wrong-btn');
-      if (btn && !btn.classList.contains('selected')) btn.click();
+      if (btn) {
+        btn.dispatchEvent(new MouseEvent('click', {bubbles: true, cancelable: true}));
+        btn.dispatchEvent(new Event('change', {bubbles: true}));
+      }
     } else if (typeText.includes('填空')) {
       var inputs = el.querySelectorAll('textarea, .blank-input');
       answers.forEach(function(ans, i) {
         if (inputs[i]) {
-          if (shouldAnswerCorrect) {
-            inputs[i].value = ans.replace(/(<[^>]+>|\\n|\\r)/g, ' ');
-          } else {
-            inputs[i].value = '略';
-          }
-          $(inputs[i]).trigger('change');
+          var val = shouldAnswerCorrect ? ans.replace(/(<[^>]+>|\\n|\r)/g, ' ') : '略';
+          _koSetValue(inputs[i], val);
         }
       });
+    } else if (typeText.includes('问答') || typeText.includes('简答') || typeText.includes('论述') || typeText.includes('综合')) {
+      var textareas = el.querySelectorAll('textarea');
+      if (textareas.length > 0) {
+        var val = (answers.length > 0) ? answers[0].replace(/(<[^>]+>|\n|\r)/g, ' ').substring(0, 200) : '略';
+        _koSetValue(textareas[0], val);
+        Logger.log('问答题已填写: ' + qId);
+      }
+    } else if (typeText.includes('文件')) {
+      Logger.log('文件题跳过: ' + qId);
+    } else {
+      Logger.log('未识别题型: ' + typeText + ' (qId: ' + qId + ')');
     }
   }
 
@@ -769,6 +876,7 @@
     if (!cfg.autoNext) return;
 
     autoState.navigating = true;
+    _videoStates = []; // 翻页后清空视频状态
     var btns = document.querySelectorAll('.mobile-next-page-btn, .next-btn, .btn-next, .nextVideoBtn');
 
     if (btns.length === 0) {
@@ -776,6 +884,7 @@
       Logger.log('未找到下一页 (' + autoState.retry + '/' + cfg.maxRetry + ')');
       if (autoState.retry >= cfg.maxRetry) {
         autoState.paused = true;
+        timerRegistry.clearAll();
         updateAutoUI();
         updateAutoProgress();
         Logger.log('连续 ' + cfg.maxRetry + ' 次未找到下一页，刷课完成');
@@ -787,35 +896,12 @@
 
     autoState.retry = 0;
     autoState.pagesDone++;
-    btns.forEach(function(b) { if (!b.classList.contains('disabled')) b.click(); });
+    // 只点击第一个可用的按钮
+    for (var i = 0; i < btns.length; i++) {
+      if (!btns[i].classList.contains('disabled')) { btns[i].click(); break; }
+    }
     Logger.log('已翻页 (累计 '+autoState.pagesDone+' 页, '+autoState.questionsDone+' 题)');
-    setTimeout(function() { autoState.navigating = false; autoProcessVideos(); autoCheckModals(); }, 3000);
-  }
-
-  function getCurrentChapterNum(){
-    var items=document.querySelectorAll('.chapter-item, .chapter-name');
-    for(var i=0;i<items.length;i++){
-      var name=items[i].querySelector('.page-name.active, .chapter-name');
-      if(items[i].querySelector('.page-name.active'))return i+1;
-    }
-    var active=document.querySelector('.chapter-item .page-name.active');
-    if(active){
-      var ch=active.closest('.chapter-item');
-      if(ch){var all=document.querySelectorAll('.chapter-item');for(var j=0;j<all.length;j++){if(all[j]===ch)return j+1;}}
-    }
-    return 0;
-  }
-
-  function isInRange(){
-    var cfg=getCfg();
-    var start=parseInt(cfg.targetChapter)||0;
-    var end=parseInt(cfg.targetSection)||0;
-    if(!start&&!end)return true;
-    var cur=getCurrentChapterNum();
-    if(!cur)return true;
-    if(start&&cur<start)return false;
-    if(end&&cur>end)return false;
-    return true;
+    timerRegistry.set(function() { autoState.navigating = false; autoProcessVideos(); autoCheckModals(); }, 3000);
   }
 
   function getAutoStats(){
@@ -844,15 +930,17 @@
   }
 
   var autoStatsInterval = 0;
+  var autoLoopId = null;
   function autoLoop() {
-    if (autoState.paused) return;
-    if(!isInRange()){
-      Logger.log('当前章节不在设定范围内，已暂停');
-      autoState.paused=true;
-      updateAutoUI();
-      updateAutoProgress();
+    if (autoState.paused) {
+      if (autoLoopId) { timerRegistry.clear(autoLoopId); autoLoopId = null; }
+      stopAntiIdle();
       return;
     }
+
+    // 初始化 MutationObserver
+    setupVideoObserver();
+
     autoProcessVideos();
     autoCheckModals();
     updateAutoProgress();
@@ -862,7 +950,20 @@
       var stats=getAutoStats();
       if(stats)Logger.log('[统计] '+stats);
     }
-    setTimeout(autoLoop, 5000);
+    autoLoopId = timerRegistry.set(autoLoop, 5000);
+    startAntiIdle();
+  }
+  var _antiIdleId = null;
+  function startAntiIdle() {
+    if (_antiIdleId) return;
+    _antiIdleId = timerRegistry.set(function antiTick() {
+      if (autoState.paused) { _antiIdleId = null; return; }
+      document.dispatchEvent(new MouseEvent('mousemove', { bubbles: true, clientX: Math.random() * window.innerWidth, clientY: Math.random() * window.innerHeight }));
+      _antiIdleId = timerRegistry.set(antiTick, 30000);
+    }, 30000);
+  }
+  function stopAntiIdle() {
+    if (_antiIdleId) { timerRegistry.clear(_antiIdleId); _antiIdleId = null; }
   }
 
   // ==================== 下载 ====================
@@ -882,20 +983,18 @@
   // ==================== Logger ====================
   var Logger = {
     el: null,
-    maxEntries: 200,
     count: 0,
+    max: 200,
     init: function(el) { this.el = el; this.count = 0; },
     log: function(msg) {
       var t = new Date().toLocaleTimeString();
       console.log('[小蟑螂] ' + msg);
       if (this.el) {
         this.count++;
-        if (this.count > this.maxEntries) {
-          var lines = this.el.innerHTML.split('<br>');
-          this.el.innerHTML = lines.slice(Math.floor(lines.length/2)).join('<br>');
-          this.count = Math.floor(lines.length/2);
-        }
-        this.el.innerHTML += '[' + t + '] ' + msg + '<br>';
+        if (this.count > this.max) { this.el.innerHTML = ''; this.count = 0; }
+        var node = document.createElement('div');
+        node.textContent = '[' + t + '] ' + msg;
+        this.el.appendChild(node);
         this.el.scrollTop = this.el.scrollHeight;
       }
     }
@@ -1110,7 +1209,7 @@
       '  <div class="brand">',
       '    <img class="logo" src="'+LOGO_URI+'" alt="小蟑螂">',
       '    <div class="name">莞工小蟑螂</div>',
-      '    <div class="ver">优学院全能助手 · v3.3.2</div>',
+      '    <div class="ver">优学院全能助手 · v3.4.5</div>',
       '  </div>',
       '  <div class="tabs">',
       showTabs.map(function(t,i){
@@ -1222,16 +1321,8 @@
         '  <label class="xz-lbl"><input type="checkbox" id="xz-auto-next" '+(cfg.autoNext?'checked':'')+'> 自动翻页</label>',
         '  <div class="xz-row">最大重试: <input type="number" id="xz-max-retry" value="'+cfg.maxRetry+'" step="1" min="1" max="20"> 次</div>',
 
-        '  <div class="xz-divider"></div>',
-        '  <div class="xz-opt-title">范围控制（可选）</div>',
-        '  <div class="xz-hint" style="margin:4px 0 6px;padding:10px 12px;">',
-        '    <div class="hp">留空则刷完整个课程。填写章节编号可限定范围，如从第 3 章刷到第 5 章。</div>',
-        '  </div>',
-        '  <div class="xz-row">起始章节: <input type="number" id="xz-ch-start" value="'+(cfg.targetChapter||'')+'" step="1" min="1" placeholder="留空"></div>',
-        '  <div class="xz-row">结束章节: <input type="number" id="xz-ch-end" value="'+(cfg.targetSection||'')+'" step="1" min="1" placeholder="留空"></div>',
-
-        '  <div class="xz-divider"></div>',
-        '  <button class="xz-btn xz-btn-success" id="xz-btn-auto">开始自动刷课</button>',
+      '  <div class="xz-divider"></div>',
+      '  <button class="xz-btn xz-btn-success" id="xz-btn-auto">开始自动刷课</button>',
         '  <div id="xz-auto-progress" style="display:none;margin-top:8px;">',
         '    <div style="background:rgba(0,0,0,.06);border-radius:6px;height:4px;overflow:hidden;"><div id="xz-auto-bar" style="background:linear-gradient(90deg,#52c41a,#389e0d);height:100%;width:0%;transition:width .5s;border-radius:6px;"></div></div>',
         '    <div id="xz-auto-progress-text" style="font-size:11px;color:#aaa;margin-top:4px;"></div>',
@@ -1247,6 +1338,24 @@
       '    <div class="title">关于</div>',
       '  </div>',
       '  <div class="xz-log-list">',
+      '    <div class="ver">v3.4.5 <span class="date">2026-07-06</span></div>',
+      '    <ul>',
+      '      <li>修复自动答题：移除view:window参数，解决MouseEvent构造错误</li>',
+      '      <li>修复题型匹配：单选题/多选题现在能正确识别</li>',
+      '      <li>修复问答题/简答题自动填写</li>',
+      '      <li>修复cfg变量在回调中的作用域问题</li>',
+      '      <li>优化自动刷课：MutationObserver监听页面变化</li>',
+      '      <li>优化自动刷课：视频卡住时自动回退3秒重试</li>',
+      '      <li>新增防挂机检测：每30秒模拟鼠标移动</li>',
+      '    </ul>',
+      '    <div class="ver">v3.4.0 <span class="date">2026-06-24</span></div>',
+      '    <ul>',
+      '      <li>全新重写自动刷课逻辑</li>',
+      '      <li>支持自动播放视频、自动答题、自动翻页</li>',
+      '      <li>支持正确率控制（固定值/区间随机）</li>',
+      '      <li>支持答题间隔随机化（防检测）</li>',
+      '      <li>支持章节范围控制</li>',
+      '    </ul>',
       '    <div class="ver">v3.3 <span class="date">2026-06-13</span></div>',
       '    <ul>',
       '      <li>品牌 Logo 嵌入面板头部和浮动按钮</li>',
@@ -1488,13 +1597,12 @@
           maxRetry: parseInt(document.getElementById('xz-max-retry').value) || 7,
           accuracyMin: parseInt(document.getElementById('xz-acc-min').value) || 100,
           accuracyMax: parseInt(document.getElementById('xz-acc-max').value) || 100,
-          answerDelay: parseInt(document.getElementById('xz-answer-delay').value) || 500,
-          targetChapter: document.getElementById('xz-ch-start').value || '',
-          targetSection: document.getElementById('xz-ch-end').value || ''
+          answerDelay: parseInt(document.getElementById('xz-answer-delay').value) || 500
         };
         saveCfg(c);
 
         if (!autoState.paused) {
+          timerRegistry.clearAll();
           autoState.startTime=Date.now();
           autoState.pagesDone=0;
           autoState.questionsDone=0;
@@ -1505,6 +1613,8 @@
           var accStr = c.accuracyMin===c.accuracyMax ? c.accuracyMin+'%' : c.accuracyMin+'%~'+c.accuracyMax+'%';
           Logger.log('自动刷课已启动 | 倍速:'+c.rate+'x | 停留:'+c.stayTime+'s | 正确率:'+accStr+' | 答题间隔:'+c.answerDelay+'ms');
         } else {
+          timerRegistry.clearAll();
+          stopAntiIdle();
           var stats=getAutoStats();
           Logger.log('自动刷课已暂停'+(stats?' | '+stats:''));
           updateAutoProgress();
@@ -1596,23 +1706,38 @@
     }
   }
 
+  // ==================== 反检测 ====================
+  try {
+    unsafeWindow.navigator.__defineGetter__("userAgent", function () {
+      return "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/83.0.4103.61 Safari/537.36";
+    });
+  } catch(e) {}
+
+  // 模拟鼠标活动防止挂机检测
+  setInterval(function () {
+    try { unsafeWindow.document.dispatchEvent(new Event('mousemove')); } catch(e) {}
+  }, 3000);
+
   // ==================== 初始化 ====================
+  var _inited=false;
   function init() {
+    if(_inited) return;
+    _inited=true;
     try {
       if (document.getElementById('xz-panel')) return;
       createUI();
-      console.log('[莞工小蟑螂] v3.3.2 已加载');
+      console.log('[莞工小蟑螂] v3.4.4 已加载');
       var lastVer='';
       try{lastVer=localStorage.getItem('xz_last_ver')||'';}catch(e){}
-      if(lastVer!=='3.3.2'){
-        try{localStorage.setItem('xz_last_ver','3.3.2');}catch(e){}
-        notify('莞工小蟑螂 v3.3.2 已更新：支持旧版优学院、填空题答案修复');
+      if(lastVer!=='3.4.4'){
+        try{localStorage.setItem('xz_last_ver','3.4.4');}catch(e){}
+        notify('莞工小蟑螂 v3.4.4 已更新：答题修复版本');
       }
     } catch (e) { console.error('[莞工小蟑螂]', e); }
   }
 
   if (document.readyState === 'complete') init();
   else window.addEventListener('load', init);
-  setInterval(function(){ if(!document.getElementById('xz-panel')) init(); }, 2000);
+  setInterval(function(){ if(!document.getElementById('xz-panel')) init(); }, 5000);
 
 })();
