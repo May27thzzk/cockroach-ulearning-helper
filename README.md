@@ -79,6 +79,16 @@ Token 有时效性，过期后需重新登录，脚本会自动检测并提示�
 - **品牌 Logo** — 内嵌小蟑螂图标
 - **导航式菜单** — 首页引导 → 功能子页面
 
+## 界面预览
+
+| 训练页面首页 | 课件页面首页 |
+|:---:|:---:|
+| <img src="screenshots/home-training.png" width="320" alt="训练页面首页"> | <img src="screenshots/home-course.png" width="320" alt="课件页面首页"> |
+
+| 课件题库导出 | 自动刷课设置 | 读书挂机 |
+|:---:|:---:|:---:|
+| <img src="screenshots/question-bank-export.png" width="240" alt="课件题库导出界面"> | <img src="screenshots/auto-course-settings.png" width="240" alt="自动刷课设置界面"> | <img src="screenshots/reading-timer.png" width="240" alt="读书挂机界面"> |
+
 ### 稳定性
 
 - **API 自动重试** — 请求失败自动重试 3 次
