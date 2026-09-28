@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         莞工小蟑螂 - 优学院全能助手
 // @namespace    https://github.com/May27thzzk/cockroach-ulearning-helper
-// @version      4.1.1
+// @version      4.1.2
 // @description  优学院课件题库导出 + 训练题库导出 + 自动静音播放/答题/翻页，莞工小蟑螂出品
 // @author       莞工小蟑螂
 // @match        https://ua.dgut.edu.cn/*
@@ -692,6 +692,7 @@
   var _videoObserver = null;
   var _videoObserverTarget = null;
   var _modalRetryTimerId = null;
+  var _lastStatAdvanceAt = 0;
   function resetVideoTracking(){
     if(_videoCheckTimerId){timerRegistry.clear(_videoCheckTimerId);_videoCheckTimerId=null;}
     if(_noVideoTimerId){timerRegistry.clear(_noVideoTimerId);_noVideoTimerId=null;}
@@ -841,16 +842,25 @@
     if(!_nextPageTimerId){Logger.log('所有视频播放完毕，' + cfg.stayTime + ' 秒后翻页');scheduleAutoGoNext(cfg.stayTime * 1000);}
   }
 
+  function advanceStatModal() {
+    var statModal=document.getElementById('statModal');
+    if(!isElementVisible(statModal))return false;
+    var forward=Array.from(statModal.querySelectorAll('button[data-bind*="goNextPage"]')).find(function(btn){
+      return isElementVisible(btn)&&!btn.disabled&&btn.getAttribute('aria-disabled')!=='true';
+    });
+    if(!forward)return true;
+    if(Date.now()-_lastStatAdvanceAt<1500)return true;
+    _lastStatAdvanceAt=Date.now();
+    Logger.log('检测到章节统计页，继续下一页');
+    try{forward.click();}catch(e){Logger.warn('章节统计页继续失败：'+(e&&e.message||e));}
+    return true;
+  }
+
   function autoCheckModals() {
     if (autoState.paused) return;
     var cfg = getCfg();
 
-    var statModal = document.getElementById('statModal');
-    if (statModal && statModal.offsetParent !== null) {
-      var btns = statModal.getElementsByTagName('button');
-      if (btns.length >= 2) btns[1].click();
-      return;
-    }
+    if(advanceStatModal())return;
 
     // 处理 alertModal — 和参考脚本逻辑对齐
     var alertModal = document.getElementById('alertModal');
@@ -1209,6 +1219,7 @@
     var candidate='';
     function verifyNavigation() {
       if (autoState.paused) { autoState.navigating = false; return; }
+      advanceStatModal();
       var after=getNavigationMarker();
       var marker=JSON.stringify(after);
       if(hasConfirmedNavigation(before,after)&&candidate===marker) {
@@ -1755,7 +1766,7 @@
       '  <button class="close" id="xz-close">&times;</button>',
       '  <div class="brand">',
       '    <img class="logo" src="'+LOGO_URI+'" alt="小蟑螂">',
-      '    <div class="brand-text"><div class="name">莞工小蟑螂</div><div class="ver">优学院全能助手 · v4.1.1</div></div>',
+      '    <div class="brand-text"><div class="name">莞工小蟑螂</div><div class="ver">优学院全能助手 · v4.1.2</div></div>',
       '  </div>',
       '  <div class="tabs" role="tablist" aria-label="功能导航">',
       showTabs.map(function(t,i){
@@ -1925,6 +1936,11 @@
       '    <div class="title">关于</div>',
       '  </div>',
       '  <div class="xz-log-list">',
+      '    <div class="ver">v4.1.2 <span class="date">2026-09-28</span></div>',
+      '    <ul>',
+      '      <li>修复跨专题统计弹窗未被识别，自动刷课和读书流程可继续前进</li>',
+      '      <li>读书模式仅处理明确的提示弹窗，避免误点题目提交按钮</li>',
+      '    </ul>',
       '    <div class="ver">v4.1.1 <span class="date">2026-09-28</span></div>',
       '    <ul>',
       '      <li>翻页需检测稳定的页面或题目标识，忽略短暂加载状态与视频地址变化</li>',
@@ -2288,23 +2304,14 @@
       }
 
       function rdDismissModals() {
-        var selectors = [
-          'button.btn-submit',
-          '#alertModal .btn-submit',
-          '.modal.fade.in .btn-hollow',
-          '.modal .btn-submit',
-          '.modal .btn-hollow',
-          '.popup-btn',
-          '.alert-btn'
-        ];
-        for (var i = 0; i < selectors.length; i++) {
-          var btn = document.querySelector(selectors[i]);
-          if (btn && btn.offsetParent !== null) {
-            btn.click();
-            Logger.log('[读书] 已关闭弹窗');
-            return true;
-          }
-        }
+        if(advanceStatModal())return true;
+        var alertModal=document.getElementById('alertModal');
+        if(!isElementVisible(alertModal))return false;
+        var btn=Array.from(alertModal.querySelectorAll('.modal-operation button')).find(function(item){
+          var label=html2text(item.textContent);
+          return isElementVisible(item)&&/^(知道了|继续学习|Got it|Continue study)$/i.test(label);
+        });
+        if(btn){btn.click();Logger.log('[读书] 已关闭提示弹窗');return true;}
         return false;
       }
 
@@ -2336,6 +2343,7 @@
         function verify(){
           rdVerifyTimer=null;
           if(!rdState.running)return;
+          advanceStatModal();
           var after=getNavigationMarker();
           var marker=JSON.stringify(after);
           if(hasConfirmedNavigation(before,after)&&candidate===marker){
@@ -2641,12 +2649,12 @@
       if (document.getElementById('xz-panel')) { _inited=true; return; }
       createUI();
       _inited=true;
-      console.log('[莞工小蟑螂] v4.1.1 已加载');
+      console.log('[莞工小蟑螂] v4.1.2 已加载');
       var lastVer='';
       try{lastVer=localStorage.getItem('xz_last_ver')||'';}catch(e){}
-      if(lastVer!=='4.1.1'){
-        try{localStorage.setItem('xz_last_ver','4.1.1');}catch(e){}
-        notify('莞工小蟑螂 v4.1.1 已加载');
+      if(lastVer!=='4.1.2'){
+        try{localStorage.setItem('xz_last_ver','4.1.2');}catch(e){}
+        notify('莞工小蟑螂 v4.1.2 已加载');
       }
     } catch (e) { _inited=false; console.error('[莞工小蟑螂]', e); }
   }

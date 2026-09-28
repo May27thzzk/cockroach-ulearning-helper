@@ -62,13 +62,13 @@ Object.defineProperty(window, 'localStorage', {
   }
 });
 const isNavigationMode = ['navigation', 'navigation-noop', 'navigation-transient'].indexOf(acceptanceConfig.mode) >= 0;
-if ((acceptanceConfig.mode && acceptanceConfig.mode.indexOf('auto-') === 0) || isNavigationMode || ['video-sequence', 'video-stall'].indexOf(acceptanceConfig.mode) >= 0) {
+if ((acceptanceConfig.mode && acceptanceConfig.mode.indexOf('auto-') === 0) || isNavigationMode || ['video-sequence', 'video-summary', 'video-stall'].indexOf(acceptanceConfig.mode) >= 0) {
   window.__acceptance.storage = window.__acceptance.storage || {};
   window.__acceptance.storage.xz_autocfg = JSON.stringify({
-    rate: 1.5, stayTime: (isNavigationMode || acceptanceConfig.mode === 'video-sequence') ? 0 : 5,
-    autoMute: false, autoPlay: isNavigationMode || ['video-sequence', 'video-stall'].indexOf(acceptanceConfig.mode) >= 0,
-    autoAnswer: !(isNavigationMode || ['video-sequence', 'video-stall'].indexOf(acceptanceConfig.mode) >= 0), autoSubmit: !isNavigationMode,
-    autoNext: isNavigationMode || ['video-sequence', 'video-stall'].indexOf(acceptanceConfig.mode) >= 0, maxRetry: 1,
+    rate: 1.5, stayTime: (isNavigationMode || ['video-sequence', 'video-summary'].indexOf(acceptanceConfig.mode) >= 0) ? 0 : 5,
+    autoMute: false, autoPlay: isNavigationMode || ['video-sequence', 'video-summary', 'video-stall'].indexOf(acceptanceConfig.mode) >= 0,
+    autoAnswer: !(isNavigationMode || ['video-sequence', 'video-summary', 'video-stall'].indexOf(acceptanceConfig.mode) >= 0), autoSubmit: !isNavigationMode,
+    autoNext: isNavigationMode || ['video-sequence', 'video-summary', 'video-stall'].indexOf(acceptanceConfig.mode) >= 0, maxRetry: 1,
     accuracyMin: 100, accuracyMax: 100, answerDelay: 100
   });
 }
@@ -212,11 +212,12 @@ window.addEventListener('load', function () {
     }, 300);
     return;
   }
-  if (state.mode === 'video-sequence') {
+  if (state.mode === 'video-sequence' || state.mode === 'video-summary') {
     let page = 1;
     state.sequenceClicks = 0;
     state.prematureClicks = 0;
     state.stalePlayCalls = 0;
+    state.summaryForwardClicks = 0;
     function setupVideo(video) {
       let time = 0, paused = true, ended = false;
       Object.defineProperty(video, 'currentTime', { configurable: true, get: function () { return time; }, set: function (value) { time = value; } });
@@ -256,6 +257,23 @@ window.addEventListener('load', function () {
         window.setTimeout(function () { result.textContent = JSON.stringify(state); }, 100);
         return;
       }
+      if (state.mode === 'video-summary' && page === 3) {
+        state.summaryShown = true;
+        const modal = document.createElement('div');
+        modal.id = 'statModal';
+        modal.className = 'modal fade in';
+        modal.style.cssText = 'position:fixed;display:block;width:220px;height:120px;top:20px;left:20px;background:white;z-index:100';
+        modal.innerHTML = '<button type="button" data-bind="click: reviewChapter">返回</button><button type="button" data-bind="click: goNextPage">下一专题</button>';
+        document.body.appendChild(modal);
+        state.summaryOffsetParentNull = modal.offsetParent === null;
+        modal.querySelector('button[data-bind*="goNextPage"]').addEventListener('click', function () {
+          state.summaryForwardClicks += 1;
+          modal.remove();
+          page += 1;
+          window.setTimeout(function () { renderPage(page); }, 20);
+        });
+        return;
+      }
       page += 1;
       window.setTimeout(function () { renderPage(page); }, 20);
     }, true);
@@ -290,9 +308,12 @@ window.addEventListener('load', function () {
     }, 20);
     return;
   }
-  if (state.mode === 'reading-sequence' || state.mode === 'reading-noop') {
+  if (state.mode === 'reading-sequence' || state.mode === 'reading-noop' || state.mode === 'reading-summary') {
     let page = 1;
     state.readingClicks = 0;
+    state.summaryForwardClicks = 0;
+    const quizSubmit=document.querySelector('.course-container .btn-submit');
+    if(quizSubmit)quizSubmit.addEventListener('click',function(){state.unwantedSubmitClicks=(state.unwantedSubmitClicks||0)+1;});
     if (state.mode === 'reading-noop') {
       const clockStart = Date.now(), perfStart = performance.now();
       Date.now = function () { return clockStart + (performance.now() - perfStart) * 13; };
@@ -301,6 +322,27 @@ window.addEventListener('load', function () {
       if (!event.target.matches('.next-page-btn')) return;
       state.readingClicks += 1;
       if (state.mode === 'reading-noop') return;
+      if(state.mode==='reading-summary'&&page===2){
+        state.summaryShown=true;
+        const modal=document.createElement('div');
+        modal.id='statModal';
+        modal.className='modal fade in';
+        modal.style.cssText='position:fixed;display:block;width:220px;height:120px;top:20px;left:20px;background:white;z-index:100';
+        modal.innerHTML='<button type="button" data-bind="click: reviewSection">返回</button><button type="button" data-bind="click: goNextPage">下一专题</button>';
+        document.body.appendChild(modal);
+        state.summaryOffsetParentNull=modal.offsetParent===null;
+        modal.querySelector('button[data-bind*="goNextPage"]').addEventListener('click',function(){
+          state.summaryForwardClicks+=1;
+          modal.remove();
+          page+=1;
+          window.setTimeout(function(){
+            const item=document.querySelector('.course-container .page-item');
+            item.id='page-'+page;
+            item.querySelector('.page-name').textContent='第'+page+'页';
+          },20);
+        });
+        return;
+      }
       page += 1;
       window.setTimeout(function () {
         const item = document.querySelector('.course-container .page-item');
@@ -318,7 +360,7 @@ window.addEventListener('load', function () {
       ticks += 1;
       const pages = Number(document.getElementById('xz-rd-pages').textContent);
       const stopped = document.getElementById('xz-btn-reading').textContent === '开始挂机';
-      if ((state.mode === 'reading-sequence' && pages >= 5) || (state.mode === 'reading-noop' && stopped) || ticks > 900) {
+      if ((['reading-sequence','reading-summary'].indexOf(state.mode)>=0 && pages >= 5) || (state.mode === 'reading-noop' && stopped) || ticks > 900) {
         window.clearInterval(poll);
         state.timedOut = ticks > 900;
         state.readingPages = pages;
@@ -495,10 +537,10 @@ function renderQuestion(question) {
 }
 
 function renderAutoBody(config) {
-  if (config.mode === 'reading-sequence' || config.mode === 'reading-noop') {
-    return '<div class="course-container"><div class="page-item" id="page-1"><div class="page-name active">第1页</div></div><button type="button" class="next-page-btn">下一页</button></div>';
+  if (['reading-sequence','reading-noop','reading-summary'].indexOf(config.mode)>=0) {
+    return '<div class="course-container"><div class="page-item" id="page-1"><div class="page-name active">第1页</div></div><button type="button" class="next-page-btn">下一页</button>'+(config.mode==='reading-summary'?'<button type="button" class="btn-submit">提交题目</button>':'')+'</div>';
   }
-  if (config.mode === 'video-sequence' || config.mode === 'video-stall') {
+  if (['video-sequence', 'video-summary', 'video-stall'].indexOf(config.mode) >= 0) {
     return '<div class="course-container"><div class="page-item" id="page-1"><div class="page-name active">第1页</div></div><video style="display:none"></video><video data-active="true"></video><button type="button" class="next-page-btn">下一页</button></div>';
   }
   if (['navigation', 'navigation-noop', 'navigation-transient'].indexOf(config.mode) >= 0) {
@@ -530,7 +572,7 @@ function runChrome(host, pagePath, options = {}) {
     acceptance: options.acceptance || { mode: 'export' }
   };
   const wrappedSource = '(function(location){\n' + source + '\n})(window.__mockLocation);';
-  const autoMode = mockLocation.acceptance && ['navigation', 'navigation-noop', 'navigation-transient', 'auto-samples', 'auto-failure', 'auto-page-switch', 'video-sequence', 'video-stall', 'reading-sequence', 'reading-noop', 'log-copy'].indexOf(mockLocation.acceptance.mode) >= 0;
+  const autoMode = mockLocation.acceptance && ['navigation', 'navigation-noop', 'navigation-transient', 'auto-samples', 'auto-failure', 'auto-page-switch', 'video-sequence', 'video-summary', 'video-stall', 'reading-sequence', 'reading-summary', 'reading-noop', 'log-copy'].indexOf(mockLocation.acceptance.mode) >= 0;
   const bodyMarkup = autoMode ? renderAutoBody(mockLocation.acceptance) : '';
   const duplicateScriptTag = options.duplicateScript ? '<script src="userscript-duplicate.js"></script>' : '';
   const html = `<!doctype html><html><head><meta charset="utf-8">
@@ -571,26 +613,26 @@ ${duplicateScriptTag}
 
 test('userscript syntax and network permissions are declared', () => {
   execFileSync(process.execPath, ['--check', sourcePath], { encoding: 'utf8' });
-  assert.match(source, /^\/\/ @version\s+4\.1\.1$/m);
+  assert.match(source, /^\/\/ @version\s+4\.1\.2$/m);
   assert.match(source, /^\/\/ @connect\s+self$/m);
   assert.match(source, /^\/\/ @connect\s+api\.dgut\.edu\.cn$/m);
   assert.match(source, /^\/\/ @connect\s+api\.ulearning\.cn$/m);
 });
 
-test('all active v4.1.1 userscript copies are byte-identical', () => {
+test('all active v4.1.2 userscript copies are byte-identical', () => {
   const crypto = require('node:crypto');
   const activeCopies = [
     sourcePath,
-    path.join(root, '莞工小蟑螂-优学院全能助手 v4.1.1.user.js'),
+    path.join(root, '莞工小蟑螂-优学院全能助手 v4.1.2.user.js'),
     path.join(root, 'xz-ulearning-helper', '莞工小蟑螂-优学院全能助手.user.js'),
-    path.join(root, 'xz-ulearning-helper', '莞工小蟑螂-优学院全能助手 v4.1.1.user.js')
+    path.join(root, 'xz-ulearning-helper', '莞工小蟑螂-优学院全能助手 v4.1.2.user.js')
   ];
   const hashes = activeCopies.map(file => {
     const copy = fs.readFileSync(file, 'utf8');
-    assert.match(copy, /^\/\/ @version\s+4\.1\.1$/m, file);
+    assert.match(copy, /^\/\/ @version\s+4\.1\.2$/m, file);
     return crypto.createHash('sha256').update(copy, 'utf8').digest('hex');
   });
-  assert.ok(hashes.every(hash => hash === hashes[0]), `v4.1.1 copy hashes differ: ${hashes.join(', ')}`);
+  assert.ok(hashes.every(hash => hash === hashes[0]), `v4.1.2 copy hashes differ: ${hashes.join(', ')}`);
 });
 
 test('home recommends the current page action and returns cleanly to the start', () => {
@@ -642,6 +684,32 @@ test('six video pages continue when the page replaces videos and chapter contain
   assert.equal(result.sequenceClicks, 6);
   assert.equal(result.prematureClicks, 0);
   assert.equal(result.stalePlayCalls, 0);
+  assert.deepEqual(result.errors, []);
+});
+
+test('video flow crosses a fixed-position chapter summary and continues', () => {
+  const result = runChrome('ua.dgut.edu.cn', '/learnCourse/learnCourse.html?courseId=mock-course', {
+    acceptance: { mode: 'video-summary' }, virtualTimeBudget: 16000, timeout: 40000
+  });
+  assert.equal(result.completed, true, JSON.stringify(result));
+  assert.equal(result.summaryShown, true);
+  assert.equal(result.summaryOffsetParentNull, true);
+  assert.equal(result.summaryForwardClicks, 1);
+  assert.equal(result.sequenceClicks, 6);
+  assert.equal(result.prematureClicks, 0);
+  assert.deepEqual(result.errors, []);
+});
+
+test('reading flow crosses chapter summary without submitting quiz controls', () => {
+  const result = runChrome('ua.dgut.edu.cn', '/learnCourse/learnCourse.html?courseId=mock-course', {
+    acceptance: { mode: 'reading-summary' }, virtualTimeBudget: 16000, timeout: 40000
+  });
+  assert.equal(result.timedOut, false, JSON.stringify(result));
+  assert.equal(result.readingPages, 5);
+  assert.equal(result.summaryShown, true);
+  assert.equal(result.summaryOffsetParentNull, true);
+  assert.equal(result.summaryForwardClicks, 1);
+  assert.equal(result.unwantedSubmitClicks || 0, 0);
   assert.deepEqual(result.errors, []);
 });
 
