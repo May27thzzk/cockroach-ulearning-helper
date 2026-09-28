@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         莞工小蟑螂 - 优学院全能助手
 // @namespace    https://github.com/May27thzzk/cockroach-ulearning-helper
-// @version      4.1
+// @version      4.1.1
 // @description  优学院课件题库导出 + 训练题库导出 + 自动静音播放/答题/翻页，莞工小蟑螂出品
 // @author       莞工小蟑螂
 // @match        https://ua.dgut.edu.cn/*
@@ -597,7 +597,8 @@
     questionsDone: 0,
     questionsCorrect: 0,
     lastAnsweredSignature: '',
-    pauseReason: ''
+    pauseReason: '',
+    lastActivityAt: 0
   };
 
   // 默认配置
@@ -658,6 +659,29 @@
     }).join(',');
     var videoSources=Array.from(document.querySelectorAll('video')).map(function(v){return v.currentSrc||v.src||'';}).join(',');
     return[location.href,pageIndex,pageId,pageTitle,questions,videoSources].join('|');
+  }
+
+  // 只用能代表学习页的稳定标识确认翻页。视频源或加载占位变化不能算成功。
+  function getNavigationMarker(){
+    var active=null;
+    var items=document.querySelectorAll('.page-item');
+    for(var i=0;i<items.length;i++){
+      var name=items[i].querySelector('.page-name');
+      if(name&&name.classList.contains('active')){
+        active=[i,items[i].id||'',html2text(name.textContent)];
+        break;
+      }
+    }
+    var questions=Array.from(document.querySelectorAll('.question-wrapper')).map(function(el){
+      var title=el.querySelector('.question-title, .question-title-text, .question-stem, .stem');
+      return(el.id||'')+':'+(title?html2text(title.textContent).slice(0,180):'');
+    }).filter(function(item){return item!==':';}).join(',');
+    return {route:location.href,page:active?active.join('|'):'',questions:questions};
+  }
+  function hasConfirmedNavigation(before,after){
+    if(after.page&&after.page!==before.page)return true;
+    if(after.questions&&after.questions!==before.questions)return true;
+    return after.route!==before.route&&!!(after.page||after.questions);
   }
 
   // 视频状态跟踪
@@ -785,7 +809,7 @@
         if (cfg.autoMute && !v.muted) v.muted = true;
         if (v.playbackRate !== cfg.rate) {try{v.playbackRate = cfg.rate;}catch(e){}}
 
-        if(v.currentTime>vs.lastTime+0.05){vs.lastTime=v.currentTime;vs.lastProgressAt=Date.now();vs.stallRetries=0;}
+        if(v.currentTime>vs.lastTime+0.05){vs.lastTime=v.currentTime;vs.lastProgressAt=Date.now();vs.stallRetries=0;autoState.lastActivityAt=Date.now();}
         var stalled=Date.now()-vs.lastProgressAt>12000;
         if(v.paused||stalled){
           if(stalled){
@@ -971,6 +995,7 @@
           failureStage = '答案写入';
           if (!(await autoFillAnswer(qId, answers))) throw new Error('答案未能写入题目');
           filled = true;
+          autoState.lastActivityAt=Date.now();
           Logger.log('题目 ' + qId + ' 已填入');
         } catch (e) {
           errorText = e && e.message ? e.message : String(e);
@@ -1175,17 +1200,21 @@
       return;
     }
 
-    var before = getCurrentPageSignature();
+    var before = getNavigationMarker();
     autoState.navigating = true;
     try { nextBtn.click(); }
     catch (e) { retryNavigation('点击下一页失败：' + (e.message||e)); return; }
     Logger.log('已点击下一页，等待页面切换确认...');
     var startedAt = Date.now();
+    var candidate='';
     function verifyNavigation() {
       if (autoState.paused) { autoState.navigating = false; return; }
-      if (getCurrentPageSignature() !== before) {
+      var after=getNavigationMarker();
+      var marker=JSON.stringify(after);
+      if(hasConfirmedNavigation(before,after)&&candidate===marker) {
         autoState.retry = 0;
         autoState.pagesDone++;
+        autoState.lastActivityAt=Date.now();
         autoState.navigating = false;
         autoState.answerInProgress = false;
         autoState.navigationReady = false;
@@ -1200,6 +1229,7 @@
         }, 800);
         return;
       }
+      candidate=hasConfirmedNavigation(before,after)?marker:'';
       if (Date.now() - startedAt >= 15000) {
         retryNavigation('点击后未检测到页面切换（等待 ' + (Date.now() - startedAt) + ' ms）');
         return;
@@ -1231,7 +1261,8 @@
     var m=Math.floor(elapsed/60),s=elapsed%60;
     var acc=autoState.questionsDone?Math.round(autoState.questionsCorrect/autoState.questionsDone*100):0;
     if(bar)bar.style.width=(autoState.paused?'100':'0')+'%';
-    if(txt)txt.textContent=(autoState.paused?(autoState.pauseReason||'已暂停'):'运行中')+' · '+m+'分'+s+'秒 | '+autoState.pagesDone+'页 | '+autoState.questionsDone+'题 | 正确率'+acc+'%';
+    var phase=autoState.navigating?'确认翻页中':autoState.answerInProgress?'处理题目中':_videoStates.length?'播放视频中':_noVideoTimerId?'等待翻页':'检查页面中';
+    if(txt)txt.textContent=(autoState.paused?(autoState.pauseReason||'已暂停'):'运行中 · '+phase)+' · '+m+'分'+s+'秒 | '+autoState.pagesDone+'页 | '+autoState.questionsDone+'题 | 正确率'+acc+'%';
   }
 
   var autoStatsInterval = 0;
@@ -1248,6 +1279,10 @@
       setupVideoObserver();
       autoProcessVideos();
       autoCheckModals();
+      if(autoState.lastActivityAt&&Date.now()-autoState.lastActivityAt>Math.max(180000,getCfg().stayTime*1000+60000)){
+        pauseAutoFlow('长时间未检测到学习进度，自动流程已暂停');
+        return;
+      }
       updateAutoProgress();
       autoStatsInterval++;
       if(autoStatsInterval>=6){autoStatsInterval=0;var stats=getAutoStats();if(stats)Logger.log('[统计] '+stats);}
@@ -1320,10 +1355,12 @@
       // 浮窗：排队批量渲染，避免逐条 DOM 操作导致卡顿
       if (this.floatBody) {
         this._queue.push({t: t, msg: msg});
+        // 后台标签页可能暂停 requestAnimationFrame，队列必须始终有上限。
+        if(this._queue.length>500)this._queue.splice(0,this._queue.length-500);
         if (!this._flushScheduled) {
           this._flushScheduled = true;
           var self = this;
-          requestAnimationFrame(function() { self._flush(); });
+          setTimeout(function() { self._flush(); }, 100);
         }
       }
     },
@@ -1455,7 +1492,7 @@
       };
       wrap.querySelector('#xz-log-copy').onclick = function() {
         var copyBtn=this;
-        var content=self.floatBody ? self.floatBody.innerText : '';
+        var content=self.floatBody ? Array.from(self.floatBody.children).map(function(line){return line.textContent;}).join('\n') : '';
         if(!content){copyBtn.textContent='无内容';setTimeout(function(){copyBtn.textContent='复制';},1200);return;}
         if(navigator.clipboard&&navigator.clipboard.writeText){
           navigator.clipboard.writeText(content).then(function(){copyBtn.textContent='已复制';},function(){copyBtn.textContent='复制失败';}).finally(function(){setTimeout(function(){copyBtn.textContent='复制';},1500);});
@@ -1718,7 +1755,7 @@
       '  <button class="close" id="xz-close">&times;</button>',
       '  <div class="brand">',
       '    <img class="logo" src="'+LOGO_URI+'" alt="小蟑螂">',
-      '    <div class="brand-text"><div class="name">莞工小蟑螂</div><div class="ver">优学院全能助手 · v4.1</div></div>',
+      '    <div class="brand-text"><div class="name">莞工小蟑螂</div><div class="ver">优学院全能助手 · v4.1.1</div></div>',
       '  </div>',
       '  <div class="tabs" role="tablist" aria-label="功能导航">',
       showTabs.map(function(t,i){
@@ -1888,6 +1925,12 @@
       '    <div class="title">关于</div>',
       '  </div>',
       '  <div class="xz-log-list">',
+      '    <div class="ver">v4.1.1 <span class="date">2026-09-28</span></div>',
+      '    <ul>',
+      '      <li>翻页需检测稳定的页面或题目标识，忽略短暂加载状态与视频地址变化</li>',
+      '      <li>后台运行时限制待渲染日志数量，长时间无学习进度时显示暂停原因</li>',
+      '      <li>修复折叠状态下复制日志为空</li>',
+      '    </ul>',
       '    <div class="ver">v4.1 <span class="date">2026-09-28</span></div>',
       '    <ul>',
       '      <li>按当前页面推荐可用功能，首页操作可直接进入设置或导出</li>',
@@ -2285,14 +2328,17 @@
           return isElementVisible(btn)&&!btn.disabled&&btn.getAttribute('aria-disabled')!=='true'&&!btn.classList.contains('disabled');
         });
         if(!nextBtn){rdRetryNavigation('未找到可用的下一页按钮');return;}
-        var before=getCurrentPageSignature();
+        var before=getNavigationMarker();
         rdState.navigating=true;
         try{nextBtn.click();}catch(e){rdRetryNavigation('点击失败：'+(e.message||e));return;}
         var startedAt=Date.now();
+        var candidate='';
         function verify(){
           rdVerifyTimer=null;
           if(!rdState.running)return;
-          if(getCurrentPageSignature()!==before){
+          var after=getNavigationMarker();
+          var marker=JSON.stringify(after);
+          if(hasConfirmedNavigation(before,after)&&candidate===marker){
             rdState.navigating=false;
             rdState.navRetries=0;
             rdState.pages++;
@@ -2303,6 +2349,7 @@
             Logger.log('[读书] 翻页已确认（累计 '+rdState.pages+' 页，耗时 '+(Date.now()-startedAt)+' ms）');
             return;
           }
+          candidate=hasConfirmedNavigation(before,after)?marker:'';
           if(Date.now()-startedAt>=15000){rdRetryNavigation('点击后页面未变化');return;}
           rdVerifyTimer=setTimeout(verify,500);
         }
@@ -2459,6 +2506,7 @@
           autoState.pauseReason = '';
           _cfgCache = null;
           autoState.startTime=Date.now();
+          autoState.lastActivityAt=autoState.startTime;
           autoState.pagesDone=0;
           autoState.questionsDone=0;
           autoState.questionsCorrect=0;
@@ -2593,12 +2641,12 @@
       if (document.getElementById('xz-panel')) { _inited=true; return; }
       createUI();
       _inited=true;
-      console.log('[莞工小蟑螂] v4.1 已加载');
+      console.log('[莞工小蟑螂] v4.1.1 已加载');
       var lastVer='';
       try{lastVer=localStorage.getItem('xz_last_ver')||'';}catch(e){}
-      if(lastVer!=='4.1'){
-        try{localStorage.setItem('xz_last_ver','4.1');}catch(e){}
-        notify('莞工小蟑螂 v4.1 已加载');
+      if(lastVer!=='4.1.1'){
+        try{localStorage.setItem('xz_last_ver','4.1.1');}catch(e){}
+        notify('莞工小蟑螂 v4.1.1 已加载');
       }
     } catch (e) { _inited=false; console.error('[莞工小蟑螂]', e); }
   }

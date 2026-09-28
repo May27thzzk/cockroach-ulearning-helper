@@ -27,6 +27,9 @@ window.addEventListener('unhandledrejection', function (event) { window.__accept
 window.unsafeWindow = window;
 window.GM_notification = function () {};
 window.fetch = function () { return Promise.resolve({}); };
+Object.defineProperty(navigator, 'clipboard', { configurable: true, value: {
+  writeText: function (value) { window.__acceptance.copiedLog = value; return Promise.resolve(); }
+} });
 const acceptanceConfig = window.__mockLocation.acceptance || {};
 window.__acceptance.mode = acceptanceConfig.mode || 'export';
 if (acceptanceConfig.darkMode) window.__acceptance.storage = { xz_dark: '1' };
@@ -58,7 +61,7 @@ Object.defineProperty(window, 'localStorage', {
     removeItem: function (key) { if (window.__acceptance.storage) delete window.__acceptance.storage[key]; }
   }
 });
-const isNavigationMode = acceptanceConfig.mode === 'navigation' || acceptanceConfig.mode === 'navigation-noop';
+const isNavigationMode = ['navigation', 'navigation-noop', 'navigation-transient'].indexOf(acceptanceConfig.mode) >= 0;
 if ((acceptanceConfig.mode && acceptanceConfig.mode.indexOf('auto-') === 0) || isNavigationMode || ['video-sequence', 'video-stall'].indexOf(acceptanceConfig.mode) >= 0) {
   window.__acceptance.storage = window.__acceptance.storage || {};
   window.__acceptance.storage.xz_autocfg = JSON.stringify({
@@ -198,6 +201,17 @@ window.addEventListener('load', function () {
     result.textContent = JSON.stringify(state);
     return;
   }
+  if (state.mode === 'log-copy') {
+    document.querySelector('.tab[data-tab="auto"]').click();
+    document.getElementById('xz-btn-auto').click();
+    window.setTimeout(function () {
+      state.logCollapsed = document.getElementById('xz-log-body').style.display === 'none';
+      document.getElementById('xz-log-copy').click();
+      state.copyButtonText = document.getElementById('xz-log-copy').textContent;
+      result.textContent = JSON.stringify(state);
+    }, 300);
+    return;
+  }
   if (state.mode === 'video-sequence') {
     let page = 1;
     state.sequenceClicks = 0;
@@ -331,7 +345,7 @@ window.addEventListener('load', function () {
     }, 20);
     return;
   }
-  if (['navigation', 'navigation-noop', 'auto-samples', 'auto-failure', 'auto-page-switch'].indexOf(state.mode) >= 0) {
+  if (['navigation', 'navigation-noop', 'navigation-transient', 'auto-samples', 'auto-failure', 'auto-page-switch'].indexOf(state.mode) >= 0) {
     const nextButton = document.querySelector('.next-page-btn');
     if (state.mode.indexOf('navigation') === 0 && nextButton) {
       const pages = Array.from(document.querySelectorAll('.page-item'));
@@ -340,6 +354,15 @@ window.addEventListener('load', function () {
         state.navigationClickAt = performance.now();
         state.navigationClickCount = (state.navigationClickCount || 0) + 1;
         if (state.mode === 'navigation-noop') return;
+        if (state.mode === 'navigation-transient') {
+          pages[0].querySelector('.page-name').classList.remove('active');
+          pages[1].querySelector('.page-name').classList.add('active');
+          window.setTimeout(function () {
+            pages[1].querySelector('.page-name').classList.remove('active');
+            pages[0].querySelector('.page-name').classList.add('active');
+          }, 700);
+          return;
+        }
         pages[activeIndex].querySelector('.page-name').classList.remove('active');
         activeIndex += 1;
         pages[activeIndex].querySelector('.page-name').classList.add('active');
@@ -380,7 +403,7 @@ window.addEventListener('load', function () {
         return;
       }
       const failed = state.logs.some(function (line) { return line.indexOf('处理失败 [阶段:') >= 0; });
-      const navigationFailed = state.mode === 'navigation-noop' && state.logs.some(function (line) { return line.indexOf('翻页失败 [阶段: 翻页确认]') >= 0; });
+      const navigationFailed = ['navigation-noop', 'navigation-transient'].indexOf(state.mode) >= 0 && state.logs.some(function (line) { return line.indexOf('翻页失败 [阶段: 翻页确认]') >= 0; });
       const pageSwitchReset = state.mode === 'auto-page-switch' && state.logs.some(function (line) { return line.indexOf('检测到页面切换，重置状态') >= 0; });
       const timeoutTicks = state.mode.indexOf('navigation') === 0 ? 1800 : 600;
       if ((state.mode === 'auto-samples' && state.submitCount > 0) || (state.mode === 'auto-failure' && failed) || pageSwitchReset || navigationFailed || ticks > timeoutTicks) {
@@ -478,7 +501,7 @@ function renderAutoBody(config) {
   if (config.mode === 'video-sequence' || config.mode === 'video-stall') {
     return '<div class="course-container"><div class="page-item" id="page-1"><div class="page-name active">第1页</div></div><video style="display:none"></video><video data-active="true"></video><button type="button" class="next-page-btn">下一页</button></div>';
   }
-  if (config.mode === 'navigation' || config.mode === 'navigation-noop') {
+  if (['navigation', 'navigation-noop', 'navigation-transient'].indexOf(config.mode) >= 0) {
     const pages = Array.from({ length: 21 }, (_, index) => `<div class="page-item" id="page-${index + 1}"><div class="page-name${index === 0 ? ' active' : ''}">第${index + 1}页</div></div>`).join('');
     return `<div class="course-container">${pages}<button type="button" class="next-page-btn">下一页</button></div>`;
   }
@@ -507,7 +530,7 @@ function runChrome(host, pagePath, options = {}) {
     acceptance: options.acceptance || { mode: 'export' }
   };
   const wrappedSource = '(function(location){\n' + source + '\n})(window.__mockLocation);';
-  const autoMode = mockLocation.acceptance && ['navigation', 'navigation-noop', 'auto-samples', 'auto-failure', 'auto-page-switch', 'video-sequence', 'video-stall', 'reading-sequence', 'reading-noop'].indexOf(mockLocation.acceptance.mode) >= 0;
+  const autoMode = mockLocation.acceptance && ['navigation', 'navigation-noop', 'navigation-transient', 'auto-samples', 'auto-failure', 'auto-page-switch', 'video-sequence', 'video-stall', 'reading-sequence', 'reading-noop', 'log-copy'].indexOf(mockLocation.acceptance.mode) >= 0;
   const bodyMarkup = autoMode ? renderAutoBody(mockLocation.acceptance) : '';
   const duplicateScriptTag = options.duplicateScript ? '<script src="userscript-duplicate.js"></script>' : '';
   const html = `<!doctype html><html><head><meta charset="utf-8">
@@ -548,26 +571,26 @@ ${duplicateScriptTag}
 
 test('userscript syntax and network permissions are declared', () => {
   execFileSync(process.execPath, ['--check', sourcePath], { encoding: 'utf8' });
-  assert.match(source, /^\/\/ @version\s+4\.1$/m);
+  assert.match(source, /^\/\/ @version\s+4\.1\.1$/m);
   assert.match(source, /^\/\/ @connect\s+self$/m);
   assert.match(source, /^\/\/ @connect\s+api\.dgut\.edu\.cn$/m);
   assert.match(source, /^\/\/ @connect\s+api\.ulearning\.cn$/m);
 });
 
-test('all active v4.1 userscript copies are byte-identical', () => {
+test('all active v4.1.1 userscript copies are byte-identical', () => {
   const crypto = require('node:crypto');
   const activeCopies = [
     sourcePath,
-    path.join(root, '莞工小蟑螂-优学院全能助手 v4.1.user.js'),
+    path.join(root, '莞工小蟑螂-优学院全能助手 v4.1.1.user.js'),
     path.join(root, 'xz-ulearning-helper', '莞工小蟑螂-优学院全能助手.user.js'),
-    path.join(root, 'xz-ulearning-helper', '莞工小蟑螂-优学院全能助手 v4.1.user.js')
+    path.join(root, 'xz-ulearning-helper', '莞工小蟑螂-优学院全能助手 v4.1.1.user.js')
   ];
   const hashes = activeCopies.map(file => {
     const copy = fs.readFileSync(file, 'utf8');
-    assert.match(copy, /^\/\/ @version\s+4\.1$/m, file);
+    assert.match(copy, /^\/\/ @version\s+4\.1\.1$/m, file);
     return crypto.createHash('sha256').update(copy, 'utf8').digest('hex');
   });
-  assert.ok(hashes.every(hash => hash === hashes[0]), `v4.1 copy hashes differ: ${hashes.join(', ')}`);
+  assert.ok(hashes.every(hash => hash === hashes[0]), `v4.1.1 copy hashes differ: ${hashes.join(', ')}`);
 });
 
 test('home recommends the current page action and returns cleanly to the start', () => {
@@ -984,5 +1007,30 @@ test('a next-button click without a page change is never counted as success', ()
   assert.equal(result.activePageText, '第1页');
   assert.ok(result.navigationFailureLogs.some(line => line.includes('[阶段: 翻页确认]')));
   assert.equal(result.logs.filter(line => line.includes('翻页已确认')).length, 0);
+  assert.deepEqual(result.errors, []);
+});
+
+test('a transient page marker is not counted as navigation', () => {
+  const result = runChrome('ua.dgut.edu.cn', '/learnCourse/learnCourse.html?courseId=mock-course', {
+    acceptance: { mode: 'navigation-transient' },
+    virtualTimeBudget: 25000,
+    timeout: 45000
+  });
+  assert.equal(result.timedOut, false, JSON.stringify(result.logs && result.logs.slice(-12)));
+  assert.equal(result.navigationClickCount, 1);
+  assert.equal(result.navigationCount, 0);
+  assert.equal(result.activePageText, '第1页');
+  assert.ok(result.navigationFailureLogs.length > 0);
+  assert.deepEqual(result.errors, []);
+});
+
+test('collapsed run log still copies its recent entries', () => {
+  const result = runChrome('ua.dgut.edu.cn', '/learnCourse/learnCourse.html?courseId=mock-course', {
+    acceptance: { mode: 'log-copy' },
+    virtualTimeBudget: 2000
+  });
+  assert.equal(result.logCollapsed, true);
+  assert.match(result.copiedLog || '', /启动参数/);
+  assert.notEqual(result.copyButtonText, '无内容');
   assert.deepEqual(result.errors, []);
 });
