@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         莞工小蟑螂 - 优学院全能助手
 // @namespace    https://github.com/May27thzzk/cockroach-ulearning-helper
-// @version      4.1
+// @version      4.0
 // @description  优学院课件题库导出 + 训练题库导出 + 自动静音播放/答题/翻页，莞工小蟑螂出品
 // @author       莞工小蟑螂
 // @match        https://ua.dgut.edu.cn/*
@@ -26,8 +26,8 @@
   var IS_DGUT = HOST.includes('dgut.edu.cn');
   var API_HOST = IS_DGUT ? 'https://api.dgut.edu.cn' : 'https://api.ulearning.cn';
   var HASH_ROUTE = (location.hash || '').split('?')[0].toLowerCase();
-  var IS_COURSE = (HOST.startsWith('ua.') && /\/learnCourse\//i.test(location.pathname)) || /^#\/course\/(?:textbook|learncourse)(?:\/|$)/.test(HASH_ROUTE);
-  var IS_TRAINING = HOST.startsWith('lms.') && /^#\/questiontrain\/practice(?:\/|$)/.test(HASH_ROUTE);
+  var IS_COURSE = HOST.startsWith('ua.') || /^#\/course\/(?:textbook|learncourse)(?:\/|$)/.test(HASH_ROUTE);
+  var IS_TRAINING = HOST.startsWith('lms.') && !IS_COURSE;
   function getPageParam(name){
     var params=new URLSearchParams(location.search||'');
     var hash=location.hash||'',queryIndex=hash.indexOf('?');
@@ -245,19 +245,6 @@
         '#xz-sel-overlay.xz-sel-dark #xz-sel-foot{border-color:rgba(255,255,255,.06);}',
         '#xz-sel-overlay.xz-sel-dark #xz-sel-foot .info{color:#777;}',
         '#xz-sel-overlay.xz-sel-dark #xz-sel-foot .btn-cancel{background:rgba(255,255,255,.06);border-color:rgba(255,255,255,.1);color:#aaa;}',
-        '#xz-sel-overlay{background:rgba(19,32,47,.48);font-family:-apple-system,BlinkMacSystemFont,"SF Pro Display","PingFang SC","Microsoft YaHei",sans-serif;}',
-        '#xz-sel-box{border:1px solid #dce5ed;border-radius:18px;box-shadow:0 20px 60px rgba(20,37,57,.22);}',
-        '#xz-sel-head{border-color:#e4ebf2;}#xz-sel-head .txt h3{color:#17202b;}#xz-sel-head .txt small{color:#5c6b7b;}',
-        '#xz-sel-head .ico{font-size:0!important;width:32px;height:32px;flex:none;background:#e9f2ff url('+LOGO_URI+') center/cover no-repeat;border-radius:9px;}',
-        '#xz-sel-actions,#xz-sel-foot{border-color:#e4ebf2;}#xz-sel-actions button,#xz-sel-foot .btn-cancel{background:#f1f5f9;border-color:#dce5ed;color:#344658;}',
-        '#xz-sel-actions button:hover,#xz-sel-foot .btn-cancel:hover{background:#e9f2ff;border-color:#a8c9ed;}',
-        '.xz-ch-item{border:1px solid transparent;}.xz-ch-item:hover{background:#f2f7fc;border-color:#e2edf8;}.xz-ch-item input[type=checkbox]{accent-color:#1769d2;}',
-        '#xz-sel-foot .btn-ok{background:#1769d2;border-radius:9px;min-height:34px;}#xz-sel-foot .btn-ok:hover{background:#145fbd;}#xz-sel-foot .btn-ok:disabled{background:#dce5ed;color:#66788a;}',
-        '#xz-sel-overlay button:focus-visible,#xz-sel-overlay input:focus-visible{outline:2px solid #1769d2;outline-offset:2px;}',
-        '#xz-sel-overlay.xz-sel-dark #xz-sel-box{background:#19202a;border-color:#405164;color:#eef4fa;}#xz-sel-overlay.xz-sel-dark #xz-sel-head h3{color:#eef4fa;}#xz-sel-overlay.xz-sel-dark #xz-sel-head small,#xz-sel-overlay.xz-sel-dark #xz-sel-foot .info{color:#b2c2d1;}',
-        '#xz-sel-overlay.xz-sel-dark #xz-sel-actions button,#xz-sel-overlay.xz-sel-dark #xz-sel-foot .btn-cancel{background:#263341;border-color:#405164;color:#eef4fa;}#xz-sel-overlay.xz-sel-dark .xz-ch-item .ch-name{color:#eef4fa;}#xz-sel-overlay.xz-sel-dark .xz-ch-item .ch-count{color:#b2c2d1;}',
-        '@media(max-width:480px){#xz-sel-box{width:calc(100vw - 24px);max-height:calc(100dvh - 32px);}#xz-sel-head{padding:15px;}#xz-sel-actions{padding:10px 15px;}#xz-sel-list{padding:8px 12px;}#xz-sel-foot{padding:12px 15px;}}',
-        '@media(prefers-reduced-motion:reduce){#xz-sel-overlay *{transition-duration:.01ms!important;}}',
         '</style>',
         '<div id="xz-sel-box">',
         '  <div id="xz-sel-head">',
@@ -276,7 +263,7 @@
         '    <span class="info" id="xz-sel-info">已选 0 章</span>',
         '    <div class="btns">',
         '      <button class="btn-cancel" id="xz-sel-cancel">取消</button>',
-        '      <button class="btn-ok" id="xz-sel-ok">导出所选章节</button>',
+        '      <button class="btn-ok" id="xz-sel-ok">开始导出</button>',
         '    </div>',
         '  </div>',
         '</div>'
@@ -596,8 +583,7 @@
     pagesDone: 0,
     questionsDone: 0,
     questionsCorrect: 0,
-    lastAnsweredSignature: '',
-    pauseReason: ''
+    lastAnsweredSignature: ''
   };
 
   // 默认配置
@@ -663,44 +649,12 @@
   // 视频状态跟踪
   var _videoStates = [];
   var _noVideoTimerId = null;
-  var _videoCheckTimerId = null;
   var _nextPageTimerId = null;
   var _videoObserver = null;
-  var _videoObserverTarget = null;
-  var _modalRetryTimerId = null;
-  function resetVideoTracking(){
-    if(_videoCheckTimerId){timerRegistry.clear(_videoCheckTimerId);_videoCheckTimerId=null;}
-    if(_noVideoTimerId){timerRegistry.clear(_noVideoTimerId);_noVideoTimerId=null;}
-    _videoStates=[];
-  }
-  function pauseAutoFlow(reason){
-    autoState.paused=true;
-    autoState.navigating=false;
-    autoState.answerInProgress=false;
-    autoState.navigationReady=false;
-    autoState.pauseReason=reason||'已暂停';
-    timerRegistry.clearAll();
-    _nextPageTimerId=null;
-    _modalRetryTimerId=null;
-    resetVideoTracking();
-    stopAntiIdle();
-    updateAutoUI();
-    updateAutoProgress();
-    Logger.warn(autoState.pauseReason);
-    notify(autoState.pauseReason);
-  }
-  function scheduleVideoCheck(){
-    if(_videoCheckTimerId||autoState.paused)return;
-    _videoCheckTimerId=timerRegistry.set(function(){_videoCheckTimerId=null;videoCtrl();},1000);
-  }
-  function getActiveVideos(){return Array.from(document.querySelectorAll('video')).filter(isElementVisible);}
 
-  // 章节容器被整块替换时重新绑定观察目标。
+  // 用 MutationObserver 监听页面变化，比轮询更高效
   function setupVideoObserver() {
-    var target = document.querySelector('.course-container') || document.querySelector('#course-container') || document.body;
-    if(_videoObserver&&_videoObserverTarget===target&&target.isConnected)return;
-    if(_videoObserver)_videoObserver.disconnect();
-    _videoObserverTarget=target;
+    if (_videoObserver) return;
     var lastUrl = location.href;
     _videoObserver = new MutationObserver(function() {
       if (autoState.paused || autoState.navigating) return;
@@ -711,13 +665,14 @@
         autoState.navigationReady = false;
         autoState.navigationBlockedSignature = '';
         autoState.currentQuestionIds = [];
-        resetVideoTracking();
+        _videoStates = [];
         Logger.log('检测到页面切换，重置状态');
       }
       if (autoState.answerInProgress) return;
       autoProcessVideos();
       autoCheckModals();
     });
+    var target = document.querySelector('.course-container') || document.querySelector('#course-container') || document.body;
     _videoObserver.observe(target, { childList: true, subtree: true });
   }
 
@@ -726,31 +681,26 @@
     var cfg = getCfg();
     if (!cfg.autoPlay) return;
 
-    var videos = getActiveVideos();
+    var videos = document.querySelectorAll('video');
     if (videos.length === 0) {
-      if(_videoCheckTimerId){timerRegistry.clear(_videoCheckTimerId);_videoCheckTimerId=null;}
-      _videoStates=[];
       if (_noVideoTimerId) return;
       Logger.log('当前页无视频，'+cfg.stayTime+' 秒后翻页');
       _noVideoTimerId = timerRegistry.set(function(){ _noVideoTimerId = null; autoGoNext(); }, cfg.stayTime * 1000);
       return;
     }
-    if(_noVideoTimerId){timerRegistry.clear(_noVideoTimerId);_noVideoTimerId=null;}
+    _noVideoTimerId = null;
 
-    // 页面可能用新 video 节点替换旧节点，但数量不变。
-    if (_videoStates.length !== videos.length || Array.from(videos).some(function(v,i){return _videoStates[i].ele!==v;})) {
-      if(_videoCheckTimerId){timerRegistry.clear(_videoCheckTimerId);_videoCheckTimerId=null;}
+    // 初始化视频状态（仅第一次或视频数量变化时）
+    if (_videoStates.length !== videos.length) {
       _videoStates = [];
-      videos.forEach(function(v) {
-        var state={ele:v,status:!!v.ended,lastTime:v.currentTime||0,lastProgressAt:Date.now(),lastPlayAttemptAt:0,lastWarningAt:0,stallRetries:0};
-        _videoStates.push(state);
-        v.addEventListener('ended',function(){state.status=true;autoProcessVideos();},{once:true});
+      videos.forEach(function(v, i) {
+        _videoStates.push({ ele: v, status: false, seek: 0, lastTime: 0 });
+        v.addEventListener('ended', function handler() { _videoStates[i].status = true; v.removeEventListener('ended', handler); }, { once: true });
       });
-      Logger.log('检测到 '+videos.length+' 个视频，开始跟踪当前页面');
     }
 
     // 检查 data-bind 属性判断完成状态
-    var statusIndicators = Array.from(document.querySelectorAll('.video-bottom span:first-child')).filter(isElementVisible);
+    var statusIndicators = document.querySelectorAll('.video-bottom span:first-child');
     if (statusIndicators.length > 0 && statusIndicators.length === videos.length) {
       videos.forEach(function(v, i) {
         if (i < _videoStates.length) {
@@ -769,9 +719,9 @@
     if (autoState.paused || autoState.navigating || autoState.answerInProgress) return;
     var cfg = getCfg();
 
-    // 视频节点变化时重新初始化，避免继续操作已经离开页面的节点。
-    var videos = getActiveVideos();
-    if (videos.length !== _videoStates.length || Array.from(videos).some(function(v,i){return _videoStates[i].ele!==v;})) {
+    // 如果视频数量变了，重新初始化
+    var videos = document.querySelectorAll('video');
+    if (videos.length !== _videoStates.length) {
       autoProcessVideos();
       return;
     }
@@ -781,40 +731,26 @@
       var vs = _videoStates[i];
       if (!vs.status) {
         var v = vs.ele;
-        if(v.ended){vs.status=true;continue;}
         if (cfg.autoMute && !v.muted) v.muted = true;
-        if (v.playbackRate !== cfg.rate) {try{v.playbackRate = cfg.rate;}catch(e){}}
+        if (v.playbackRate !== cfg.rate) v.playbackRate = cfg.rate;
 
-        if(v.currentTime>vs.lastTime+0.05){vs.lastTime=v.currentTime;vs.lastProgressAt=Date.now();vs.stallRetries=0;}
-        var stalled=Date.now()-vs.lastProgressAt>12000;
-        if(v.paused||stalled){
-          if(stalled){
-            vs.stallRetries++;
-            if(vs.stallRetries>=4){pauseAutoFlow('视频连续 4 次未播放或进度未变化，自动流程已暂停');return;}
-            try{v.currentTime=Math.max(0,v.currentTime-3);}catch(e){}
-            vs.lastTime=v.currentTime;
-            vs.lastProgressAt=Date.now();
-            Logger.log('视频进度超过 12 秒未变化，回退 3 秒重试');
-          }
-          if(Date.now()-vs.lastPlayAttemptAt>=3000){
-            vs.lastPlayAttemptAt=Date.now();
-            try{
-              var playResult=v.play();
-              if(playResult&&typeof playResult.catch==='function')playResult.catch(function(e){
-                if(Date.now()-vs.lastWarningAt>10000){vs.lastWarningAt=Date.now();Logger.warn('视频播放未启动：'+(e&&e.message||e));}
-              });
-            }catch(e){
-              if(Date.now()-vs.lastWarningAt>10000){vs.lastWarningAt=Date.now();Logger.warn('视频播放失败：'+(e.message||e));}
-            }
-          }
+        // 检测视频是否卡住（时间没有前进）
+        if (v.paused || vs.lastTime === v.currentTime) {
+          v.currentTime = Math.max(0, v.currentTime - 3);
+          v.play().catch(function(){});
+          Logger.log('视频卡住，回退3秒重试');
         }
-        scheduleVideoCheck();
+        vs.lastTime = v.currentTime;
+
+        // 延迟后继续检查
+        timerRegistry.set(function() { videoCtrl(); }, 500);
         return;
       }
     }
 
     // 所有视频都完成了，翻页
-    if(!_nextPageTimerId){Logger.log('所有视频播放完毕，' + cfg.stayTime + ' 秒后翻页');scheduleAutoGoNext(cfg.stayTime * 1000);}
+    Logger.log('所有视频播放完毕，' + cfg.stayTime + ' 秒后翻页');
+    scheduleAutoGoNext(cfg.stayTime * 1000);
   }
 
   function autoCheckModals() {
@@ -845,8 +781,8 @@
         });
       }
       // 弹窗关闭后再尝试答题
-      if (cfg.autoAnswer && !_modalRetryTimerId) {
-        _modalRetryTimerId=timerRegistry.set(function(){_modalRetryTimerId=null;autoCheckModals();},500);
+      if (cfg.autoAnswer) {
+        setTimeout(function() { autoCheckModals(); }, 500);
       }
       return;
     }
@@ -911,7 +847,7 @@
         if (failed.length) {
           Logger.log('有题目未能确认填入（' + failed.join(', ') + '），已停止自动提交和翻页，请检查后手动处理');
           autoState.navigationBlockedSignature = pageSignature;
-          pauseAutoFlow('题目 '+failed.join(', ')+' 填入失败，自动流程已暂停');
+          autoState.answerInProgress = false;
           return;
         }
         autoState.navigationBlockedSignature = '';
@@ -932,19 +868,19 @@
               } catch (e) {
                 Logger.log('题目 ' + qIds.join(',') + ' 处理失败 [阶段: 提交执行]：' + (e.message||e) + '；答案保留在页面');
                 autoState.navigationBlockedSignature = pageSignature;
-                pauseAutoFlow('提交执行失败，自动流程已暂停');
+                autoState.navigationReady = false;
+                autoState.answerInProgress = false;
                 return;
               }
             } else {
               Logger.log('题目 ' + qIds.join(',') + ' 处理失败 [阶段: 提交按钮]：未找到可用按钮；答案保留在页面，未自动翻页');
               autoState.navigationBlockedSignature = pageSignature;
-              pauseAutoFlow('未找到提交按钮，自动流程已暂停');
+              autoState.navigationReady = false;
+              autoState.answerInProgress = false;
               return;
             }
           } else {
             Logger.log('自动提交已关闭，答案保留在页面供检查');
-            pauseAutoFlow('答案待手动检查与提交，自动流程已暂停');
-            return;
           }
           if (cfg2.autoNext) {
             scheduleAutoGoNext(2000);
@@ -1159,7 +1095,17 @@
       var qLabel = autoState.currentQuestionIds.length ? autoState.currentQuestionIds.join(',') : '无';
       Logger.log('题目 ' + qLabel + ' 翻页失败 [阶段: 翻页确认]：' + reason + ' (' + autoState.retry + '/' + cfg.maxRetry + ')');
       if (autoState.retry >= cfg.maxRetry) {
-        pauseAutoFlow('连续多次未能确认翻页，自动流程已暂停');
+        autoState.paused = true;
+        autoState.answerInProgress = false;
+        autoState.navigationReady = false;
+        timerRegistry.clearAll();
+        _nextPageTimerId = null;
+        _noVideoTimerId = null;
+        stopAntiIdle();
+        updateAutoUI();
+        updateAutoProgress();
+        Logger.log('连续多次未能确认翻页，已暂停；请检查页面状态后手动继续');
+        notify('翻页未能确认，自动流程已暂停');
         return;
       }
       // 答题状态保持锁定，避免翻页重试期间再次处理同一页的题目。
@@ -1191,7 +1137,8 @@
         autoState.navigationReady = false;
         autoState.navigationBlockedSignature = '';
         autoState.currentQuestionIds = [];
-        resetVideoTracking();
+        _videoStates = [];
+        _noVideoTimerId = null;
         Logger.log('翻页已确认，耗时 ' + (Date.now() - startedAt) + ' ms (累计 ' + autoState.pagesDone + ' 页, ' + autoState.questionsDone + ' 题)');
         timerRegistry.set(function(){
           if (autoState.paused) return;
@@ -1231,7 +1178,7 @@
     var m=Math.floor(elapsed/60),s=elapsed%60;
     var acc=autoState.questionsDone?Math.round(autoState.questionsCorrect/autoState.questionsDone*100):0;
     if(bar)bar.style.width=(autoState.paused?'100':'0')+'%';
-    if(txt)txt.textContent=(autoState.paused?(autoState.pauseReason||'已暂停'):'运行中')+' · '+m+'分'+s+'秒 | '+autoState.pagesDone+'页 | '+autoState.questionsDone+'题 | 正确率'+acc+'%';
+    if(txt)txt.textContent=(autoState.paused?'已完成 ':'运行中 ')+m+'分'+s+'秒 | '+autoState.pagesDone+'页 | '+autoState.questionsDone+'题 | 正确率'+acc+'%';
   }
 
   var autoStatsInterval = 0;
@@ -1244,17 +1191,20 @@
       return;
     }
 
-    try{
-      setupVideoObserver();
-      autoProcessVideos();
-      autoCheckModals();
-      updateAutoProgress();
-      autoStatsInterval++;
-      if(autoStatsInterval>=6){autoStatsInterval=0;var stats=getAutoStats();if(stats)Logger.log('[统计] '+stats);}
-    }catch(e){Logger.error('自动流程检查异常：'+(e&&e.message||e));}
-    finally{
-      if(!autoState.paused){autoLoopId=timerRegistry.set(autoLoop,5000);startAntiIdle();}
+    // 初始化 MutationObserver
+    setupVideoObserver();
+
+    autoProcessVideos();
+    autoCheckModals();
+    updateAutoProgress();
+    autoStatsInterval++;
+    if(autoStatsInterval>=6){
+      autoStatsInterval=0;
+      var stats=getAutoStats();
+      if(stats)Logger.log('[统计] '+stats);
     }
+    autoLoopId = timerRegistry.set(autoLoop, 5000);
+    startAntiIdle();
   }
   var _antiIdleId = null;
   function startAntiIdle() {
@@ -1331,77 +1281,62 @@
       this._flushScheduled = false;
       if (!this._queue.length || !this.floatBody) return;
       var frag = document.createDocumentFragment();
-      var pending = this._queue.splice(0);
-      pending.forEach(function(item) {
+      while (this._queue.length) {
+        var item = this._queue.shift();
         var line = document.createElement('div');
         var isError = item.msg.indexOf('失败') !== -1 || item.msg.indexOf('错误') !== -1;
         var isOk = item.msg.indexOf('已') === 0 || item.msg.indexOf('完成') !== -1 || item.msg.indexOf('启动') !== -1;
         line.textContent = item.t + ' ' + item.msg;
-        line.className = 'xz-log-line' + (isError?' xz-log-error':isOk?' xz-log-ok':'');
+        line.style.cssText = 'padding:1px 0;font-size:12px;line-height:1.6;color:' + (isError?'#ff8787':isOk?'#8ce99a':'#ced4da') + ';white-space:pre-wrap;word-break:break-all;';
         frag.appendChild(line);
-      });
+      }
       // 移除超限旧条目
-      this.floatBody.appendChild(frag);
       while (this.floatBody.children.length > 500) this.floatBody.removeChild(this.floatBody.firstChild);
+      this.floatBody.appendChild(frag);
       if (!this.paused) this.floatBody.scrollTop = this.floatBody.scrollHeight;
       if (this._countEl) this._countEl.textContent = this.floatBody.children.length;
     },
     log: function(msg) { this._addLine(msg); },
     info: function(msg) { this._addLine(msg); },
-    warn: function(msg) { this._addLine('[WARN] ' + msg); if(this.floatEl&&this.floatEl.style.display!=='none'&&this._setCollapsed)this._setCollapsed(false); },
-    error: function(msg) { this._addLine('[ERROR] ' + msg); if(this.floatEl&&this.floatEl.style.display!=='none'&&this._setCollapsed)this._setCollapsed(false); },
+    warn: function(msg) { this._addLine('[WARN] ' + msg); },
+    error: function(msg) { this._addLine('[ERROR] ' + msg); },
     createFloat: function() {
       if (this.floatEl) return;
       var existingFloat=document.getElementById('xz-float-log');
       if(existingFloat){this.floatEl=existingFloat;this.floatBody=existingFloat.querySelector('#xz-log-body');this._countEl=existingFloat.querySelector('#xz-log-count');return;}
       var self = this;
 
-      // 与主面板共用冷色轻玻璃视觉
+      // 主面板同款玻璃拟态样式
       var wrap = document.createElement('div');
       wrap.id = 'xz-float-log';
-      try{wrap.classList.toggle('xz-log-dark',localStorage.getItem('xz_dark')==='1');}catch(e){}
-      wrap.style.cssText = 'position:fixed;bottom:16px;left:16px;z-index:999997;width:min(380px,calc(100vw - 32px));height:42px;'+
-        'background:rgba(249,251,253,.96);backdrop-filter:blur(18px);-webkit-backdrop-filter:blur(18px);'+
-        'border:1px solid #dce5ed;border-radius:16px;'+
-        'box-shadow:0 16px 44px rgba(35,57,80,.18);'+
+      wrap.style.cssText = 'position:fixed;bottom:20px;left:20px;z-index:999997;width:380px;height:180px;'+
+        'background:rgba(255,255,255,.72);backdrop-filter:blur(20px) saturate(1.4);-webkit-backdrop-filter:blur(20px) saturate(1.4);'+
+        'border:1px solid rgba(255,255,255,.6);border-radius:14px;'+
+        'box-shadow:0 8px 32px rgba(0,0,0,.08),inset 0 1px 0 rgba(255,255,255,.8);'+
         'font-family:-apple-system,"PingFang SC","Helvetica Neue",sans-serif;'+
         'display:flex;flex-direction:column;overflow:hidden;'+
         'transition:opacity .2s,transform .2s;'+
         'transform-origin:bottom left;';
 
       wrap.innerHTML =
-        '<style>#xz-float-log .xz-log-line{padding:3px 0;color:#344658;font-size:11px;line-height:1.55;white-space:pre-wrap;word-break:break-word;border-bottom:1px solid rgba(107,129,151,.10);}'+
-        '#xz-float-log .xz-log-error{color:#b7333c;}#xz-float-log .xz-log-ok{color:#18744d;}'+
-        '#xz-float-log button:focus-visible{outline:2px solid #1769d2;outline-offset:2px;}'+
-        '#xz-float-log.xz-log-dark{background:#19202a!important;border-color:#405164!important;color:#eef4fa;}'+
-        '#xz-float-log.xz-log-dark .xz-log-head{background:#263341!important;border-color:#405164!important;}'+
-        '#xz-float-log.xz-log-dark .xz-log-head span{color:#eef4fa!important;}'+
-        '#xz-float-log.xz-log-dark .xz-log-head button{background:#202c39!important;border-color:#405164!important;color:#c7d5e2!important;}'+
-        '#xz-float-log.xz-log-dark #xz-log-body{color:#eef4fa!important;}'+
-        '#xz-float-log.xz-log-dark .xz-log-line{color:#c7d5e2;border-color:#405164;}'+
-        '#xz-float-log.xz-log-dark .xz-log-error{color:#ff9ca2;}#xz-float-log.xz-log-dark .xz-log-ok{color:#78dbab;}'+
-        '@media(max-width:480px){#xz-float-log{left:12px!important;right:12px!important;bottom:12px!important;top:auto!important;width:auto!important;max-height:40dvh;}}'+
-        '@media(prefers-reduced-motion:reduce){#xz-float-log,#xz-float-log *{transition-duration:.01ms!important;}}</style>'+
         '<div class="xz-log-head" style="display:flex;align-items:center;justify-content:space-between;'+
-        'padding:10px 14px;cursor:move;user-select:none;flex-shrink:0;'+
-        'background:rgba(255,255,255,.7);border-bottom:1px solid #dce5ed;">'+
-        '<span style="font-size:12px;font-weight:650;color:#17202b;">运行日志</span>'+
+        'padding:8px 14px;cursor:move;user-select:none;flex-shrink:0;'+
+        'background:rgba(255,255,255,.3);border-bottom:1px solid rgba(0,0,0,.05);">'+
+        '<span style="font-size:12px;font-weight:600;color:#1a1a2e;letter-spacing:.3px;">运行日志</span>'+
         '<div style="display:flex;gap:5px;align-items:center;">'+
-        '<span id="xz-log-count" style="font-size:10px;color:#5c6b7b;min-width:20px;text-align:right;">0</span>'+
+        '<span id="xz-log-count" style="font-size:10px;color:#aaa;">0</span>'+
         '<button id="xz-log-pause" style="background:rgba(0,0,0,.04);border:1px solid rgba(0,0,0,.08);'+
-        'color:#1769d2;cursor:pointer;font-size:10px;padding:3px 8px;border-radius:8px;'+
+        'color:#40c057;cursor:pointer;font-size:10px;padding:2px 8px;border-radius:8px;'+
         'transition:all .15s;" title="暂停滚动">滚动中</button>'+
         '<button id="xz-log-clear" style="background:rgba(0,0,0,.04);border:1px solid rgba(0,0,0,.08);'+
-        'color:#344658;cursor:pointer;font-size:10px;padding:3px 7px;border-radius:8px;'+
+        'color:#868e96;cursor:pointer;font-size:10px;padding:2px 6px;border-radius:8px;'+
         'transition:all .15s;" title="清空日志">清空</button>'+
-        '<button id="xz-log-copy" style="background:rgba(0,0,0,.04);border:1px solid rgba(0,0,0,.08);'+
-        'color:#344658;cursor:pointer;font-size:10px;padding:3px 7px;border-radius:8px;" title="复制可见日志">复制</button>'+
         '<button id="xz-log-toggle" style="background:rgba(0,0,0,.04);border:1px solid rgba(0,0,0,.08);'+
-        'color:#344658;cursor:pointer;font-size:11px;padding:3px 7px;border-radius:8px;'+
-        'line-height:1;transition:all .15s;" title="展开日志">展开</button>'+
+        'color:#868e96;cursor:pointer;font-size:11px;padding:2px 6px;border-radius:8px;'+
+        'line-height:1;transition:all .15s;" title="收起">—</button>'+
         '</div></div>'+
-        '<div id="xz-log-body" style="flex:1;overflow-y:auto;padding:7px 14px;'+
-        'font-size:11px;line-height:1.55;color:#344658;'+
+        '<div id="xz-log-body" style="flex:1;overflow-y:auto;padding:6px 14px;'+
+        'font-size:12px;line-height:1.6;color:#495057;'+
         'scrollbar-width:thin;scrollbar-color:rgba(0,0,0,.1) transparent;"></div>';
       document.body.appendChild(wrap);
       this.floatEl = wrap;
@@ -1409,27 +1344,23 @@
       this._countEl = wrap.querySelector('#xz-log-count');
 
       // 折叠/展开
-      var collapsed = true;
+      var collapsed = false;
       var logBody = wrap.querySelector('#xz-log-body');
-      logBody.style.display='none';
-      function setCollapsed(value){
-        collapsed=value;
+      wrap.querySelector('#xz-log-toggle').onclick = function() {
+        collapsed = !collapsed;
         logBody.style.display = collapsed ? 'none' : '';
-        wrap.style.height = collapsed ? '42px' : '210px';
-        var button=wrap.querySelector('#xz-log-toggle');
-        button.textContent=collapsed?'展开':'收起';
-        button.title=collapsed?'展开日志':'收起日志';
-      }
-      this._setCollapsed=setCollapsed;
-      wrap.querySelector('#xz-log-toggle').onclick=function(){setCollapsed(!collapsed);};
+        wrap.style.height = collapsed ? '36px' : '180px';
+        this.textContent = collapsed ? '□' : '—';
+        this.title = collapsed ? '展开' : '收起';
+      };
 
       // 暂停/恢复滚动
       var pauseBtn = wrap.querySelector('#xz-log-pause');
       function setPauseUI(paused) {
         self.paused = paused;
         pauseBtn.textContent = paused ? '已暂停' : '滚动中';
-        pauseBtn.style.color = paused ? '#b7333c' : '#1769d2';
-        pauseBtn.style.background = paused ? 'rgba(183,51,60,.10)' : 'rgba(0,0,0,.04)';
+        pauseBtn.style.color = paused ? '#fa5252' : '#40c057';
+        pauseBtn.style.background = paused ? 'rgba(250,82,82,.08)' : 'rgba(0,0,0,.04)';
         if (!paused && self.floatBody) self.floatBody.scrollTop = self.floatBody.scrollHeight;
       }
       pauseBtn.onclick = function() { setPauseUI(!self.paused); };
@@ -1452,14 +1383,6 @@
         self.floatBody.innerHTML = '';
         self._queue = [];
         if (self._countEl) self._countEl.textContent = '0';
-      };
-      wrap.querySelector('#xz-log-copy').onclick = function() {
-        var copyBtn=this;
-        var content=self.floatBody ? self.floatBody.innerText : '';
-        if(!content){copyBtn.textContent='无内容';setTimeout(function(){copyBtn.textContent='复制';},1200);return;}
-        if(navigator.clipboard&&navigator.clipboard.writeText){
-          navigator.clipboard.writeText(content).then(function(){copyBtn.textContent='已复制';},function(){copyBtn.textContent='复制失败';}).finally(function(){setTimeout(function(){copyBtn.textContent='复制';},1500);});
-        }else{copyBtn.textContent='复制失败';setTimeout(function(){copyBtn.textContent='复制';},1500);}
       };
 
       // 拖动
@@ -1518,8 +1441,6 @@
 
     var isRelevantPage = IS_COURSE || IS_TRAINING;
     var showTabs = isAutoPage ? ['首页','题库导出','自动刷课','读书挂机','关于'] : (isRelevantPage ? ['首页','题库导出','关于'] : ['首页','关于']);
-    var pageName = isAutoPage ? '课件学习页' : IS_COURSE ? '课件目录页' : IS_TRAINING ? '题库训练页' : '其他页面';
-    var pageIntro = isAutoPage ? '可自动学习，也可导出本课程题库。' : IS_COURSE ? '已识别课程，可按章节选择并导出题库。' : IS_TRAINING ? '已识别训练，可导出当前训练的题目与答案。' : '打开课件学习页或题库训练页后使用对应功能。';
 
     panel.innerHTML = [
             '<style>',
@@ -1628,102 +1549,20 @@
       '#xz-panel.xz-dark .xz-body::-webkit-scrollbar-thumb{background:rgba(168,153,216,.15);}',
       '#xz-panel.xz-dark .close{color:#555;}',
       '#xz-panel.xz-dark .close:hover{color:#999;}',
-      '/* v4.1：冷色轻玻璃面板，强调当前页面与主要操作 */',
-      '#xz-panel{--xz-bg:rgba(249,251,253,.96);--xz-surface:#fff;--xz-soft:#f1f5f9;--xz-text:#17202b;--xz-muted:#5c6b7b;--xz-line:#dce5ed;--xz-accent:#1769d2;--xz-accent-soft:#e9f2ff;--xz-danger:#c33b40;width:356px;max-width:calc(100vw - 24px);max-height:calc(100vh - 32px);top:16px;right:16px;background:var(--xz-bg);color:var(--xz-text);border:1px solid rgba(214,225,235,.9);border-radius:20px;box-shadow:0 18px 56px rgba(35,57,80,.18),0 2px 8px rgba(35,57,80,.06);backdrop-filter:blur(18px);-webkit-backdrop-filter:blur(18px);font-family:-apple-system,BlinkMacSystemFont,"SF Pro Display","PingFang SC","Microsoft YaHei",sans-serif;letter-spacing:0;}',
-      '#xz-panel .xz-head{padding:16px 16px 10px;cursor:grab;border-bottom:1px solid var(--xz-line);}',
-      '#xz-panel .xz-body{padding:16px;scrollbar-color:#cbd7e2 transparent;}',
-      '#xz-panel .brand{display:flex;align-items:center;gap:10px;text-align:left;margin:0 38px 14px 0;min-height:38px;}',
-      '#xz-panel .brand .logo{width:38px;height:38px;margin:0;border-radius:11px;flex:none;background:var(--xz-surface);box-shadow:0 1px 4px rgba(25,42,62,.12);}',
-      '#xz-panel .brand .name{font-size:16px;line-height:1.25;font-weight:700;letter-spacing:0;color:var(--xz-text);}',
-      '#xz-panel .brand .ver{font-size:11px;line-height:1.4;letter-spacing:0;color:var(--xz-muted);margin-top:2px;}',
-      '#xz-panel .close{top:18px;right:16px;width:30px;height:30px;border-radius:9px;color:var(--xz-muted);font-size:21px;line-height:30px;}',
-      '#xz-panel .close:hover{background:var(--xz-soft);color:var(--xz-text);}',
-      '#xz-panel .tabs{display:flex;gap:4px;overflow-x:auto;margin:0;padding:3px;background:var(--xz-soft);border-radius:11px;scrollbar-width:none;}',
-      '#xz-panel .tabs::-webkit-scrollbar{display:none;}',
-      '#xz-panel .tab{flex:0 0 auto;min-width:54px;padding:8px 10px;border:0;background:transparent;color:var(--xz-muted);border-radius:8px;font-family:inherit;font-size:12px;white-space:nowrap;}',
-      '#xz-panel .tab.active{background:var(--xz-surface);color:var(--xz-text);box-shadow:0 1px 4px rgba(24,43,66,.10);font-weight:650;}',
-      '#xz-panel .tab:hover{color:var(--xz-text);background:rgba(255,255,255,.55);}',
-      '#xz-panel .xz-context{padding:17px;border:1px solid var(--xz-line);border-radius:16px;background:var(--xz-surface);box-shadow:0 2px 8px rgba(31,53,77,.04);}',
-      '#xz-panel .xz-context-label{display:flex;align-items:center;gap:7px;color:var(--xz-muted);font-size:11px;}',
-      '#xz-panel .xz-context-dot{width:7px;height:7px;border-radius:50%;background:#27a979;box-shadow:0 0 0 3px rgba(39,169,121,.12);}',
-      '#xz-panel .xz-context-unknown{background:#9aa9b8;box-shadow:0 0 0 3px rgba(154,169,184,.13);}',
-      '#xz-panel .xz-context-title{font-size:20px;font-weight:700;line-height:1.3;color:var(--xz-text);margin:8px 0 3px;}',
-      '#xz-panel .xz-context p{font-size:12px;line-height:1.6;color:var(--xz-muted);margin:0;}',
-      '#xz-panel .xz-home-title{font-size:12px;font-weight:650;color:var(--xz-text);margin:18px 0 8px;}',
-      '#xz-panel .xz-home-action{position:relative;display:block;width:100%;text-align:left;padding:16px 38px 16px 16px;border:1px solid #135fc1;border-radius:14px;background:#1769d2;color:#fff;cursor:pointer;font-family:inherit;box-shadow:0 5px 14px rgba(23,105,210,.16);}',
-      '#xz-panel .xz-home-action:hover{background:#145fbd;box-shadow:0 7px 16px rgba(23,105,210,.22);}',
-      '#xz-panel .xz-home-action:active{transform:scale(.99);}',
-      '#xz-panel .xz-home-action-name{display:block;font-size:14px;font-weight:650;line-height:1.4;}',
-      '#xz-panel .xz-home-action-desc{display:block;font-size:11px;line-height:1.5;color:#dceaff;margin-top:3px;}',
-      '#xz-panel .xz-home-chevron{position:absolute;right:16px;top:50%;transform:translateY(-50%);font-size:25px;font-weight:300;}',
-      '#xz-panel .xz-home-secondary{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:8px;}',
-      '#xz-panel .xz-home-secondary button{display:flex;align-items:center;justify-content:space-between;gap:4px;min-height:48px;text-align:left;padding:10px 12px;border:1px solid var(--xz-line);border-radius:12px;background:var(--xz-surface);color:var(--xz-text);cursor:pointer;font-family:inherit;font-weight:600;font-size:12px;line-height:1.4;}',
-      '#xz-panel .xz-home-secondary button:hover{border-color:#94bce8;background:var(--xz-accent-soft);}',
-      '#xz-panel .xz-home-secondary span{font-size:18px;color:var(--xz-muted);}',
-      '#xz-panel .xz-home-guide{display:flex;flex-direction:column;gap:5px;margin-top:15px;padding:12px 14px;background:var(--xz-soft);border-radius:12px;font-size:11px;line-height:1.55;color:var(--xz-muted);}',
-      '#xz-panel .xz-home-guide strong{font-size:11px;color:var(--xz-text);}',
-      '#xz-panel .xz-sub-head{margin-bottom:12px;gap:9px;}',
-      '#xz-panel .xz-sub-head .back{width:30px;height:30px;border:1px solid var(--xz-line);border-radius:9px;background:var(--xz-surface);color:var(--xz-text);}',
-      '#xz-panel .xz-sub-head .title{font-size:16px;font-weight:700;color:var(--xz-text);}',
-      '#xz-panel .xz-hint{padding:12px 14px;background:var(--xz-accent-soft);border:1px solid #d4e7ff;border-left:3px solid var(--xz-accent);border-radius:10px;}',
-      '#xz-panel .xz-hint .ht,#xz-panel .xz-export-result .hint-title{color:var(--xz-text);font-size:12px;}',
-      '#xz-panel .xz-hint .hp{color:var(--xz-muted);font-size:11px;line-height:1.6;}',
-      '#xz-panel .xz-btn{min-height:42px;border-radius:11px;font-family:inherit;font-size:13px;font-weight:650;letter-spacing:0;box-shadow:none;}',
-      '#xz-panel .xz-btn:hover{transform:none;filter:brightness(.96);box-shadow:none;}',
-      '#xz-panel .xz-btn:active{transform:scale(.99);}',
-      '#xz-panel .xz-btn-primary,#xz-panel .xz-btn-success{background:var(--xz-accent);color:#fff;}',
-      '#xz-panel .xz-btn-danger{background:var(--xz-surface);border:1px solid #e4abb0;color:var(--xz-danger);}',
-      '#xz-panel .xz-btn:disabled{background:var(--xz-soft);color:#8e9ba8;border:1px solid var(--xz-line);}',
-      '#xz-panel .xz-opt-title{font-size:11px;color:var(--xz-muted);letter-spacing:0;text-transform:none;margin:15px 0 7px;}',
-      '#xz-panel .xz-row,#xz-panel label.xz-lbl{font-size:12px;line-height:1.5;color:var(--xz-text);margin:8px 0;}',
-      '#xz-panel input[type=number]{background:var(--xz-surface);border:1px solid var(--xz-line);border-radius:8px;color:var(--xz-text);}',
-      '#xz-panel input[type=number]:focus{border-color:var(--xz-accent);box-shadow:0 0 0 3px rgba(23,105,210,.13);}',
-      '#xz-panel input[type=checkbox]{accent-color:var(--xz-accent);}',
-      '#xz-panel .xz-divider{border-color:var(--xz-line);}',
-      '#xz-panel .xz-action-dock{display:none;flex-shrink:0;padding:10px 16px 14px;background:var(--xz-bg);border-top:1px solid var(--xz-line);}',
-      '#xz-panel.xz-view-auto .xz-action-dock{display:block;}',
-      '#xz-panel .xz-action-dock #xz-auto-progress{margin-top:9px;}',
-      '#xz-panel #xz-progress-bar,#xz-panel #xz-auto-bar,#xz-panel #xz-rd-bar{background:var(--xz-accent)!important;}',
-      '#xz-panel #xz-rd-apply{background:var(--xz-accent)!important;border-radius:7px!important;min-height:28px;}',
-      '#xz-panel #xz-btn-cancel{color:var(--xz-danger)!important;border-color:#e4abb0!important;min-height:28px;}',
-      '#xz-panel #xz-reading-timer{color:var(--xz-text)!important;}',
-      '#xz-panel #xz-rd-pages,#xz-panel #xz-rd-total{color:var(--xz-accent)!important;}',
-      '#xz-panel .xz-st,#xz-panel .xz-log-list{color:var(--xz-muted);}',
-      '#xz-panel .xz-log{background:var(--xz-soft);border-color:var(--xz-line);color:var(--xz-text);}',
-      '#xz-panel .xz-log-list .ver{color:var(--xz-text);}',
-      '#xz-panel .xz-log-list .date{color:var(--xz-muted);}',
-      '#xz-panel .xz-footer{border-color:var(--xz-line);}',
-      '#xz-panel .xz-footer .copy,#xz-panel .xz-footer .disc{color:var(--xz-muted);}',
-      '#xz-panel.xz-dark{--xz-bg:rgba(25,32,42,.97);--xz-surface:#263341;--xz-soft:#202c39;--xz-text:#eef4fa;--xz-muted:#b2c2d1;--xz-line:#405164;--xz-accent:#71adff;--xz-accent-soft:#243b57;--xz-danger:#ff9ca2;background:var(--xz-bg);border-color:var(--xz-line);color:var(--xz-text);}',
-      '#xz-panel.xz-dark .brand .name,#xz-panel.xz-dark .xz-sub-head .title,#xz-panel.xz-dark .xz-hint .ht,#xz-panel.xz-dark .xz-hint .hp,#xz-panel.xz-dark label.xz-lbl,#xz-panel.xz-dark .xz-row,#xz-panel.xz-dark .xz-log-list,#xz-panel.xz-dark .xz-log-list .ver{color:var(--xz-text);}',
-      '#xz-panel.xz-dark .brand .ver,#xz-panel.xz-dark .xz-st,#xz-panel.xz-dark .xz-footer .copy,#xz-panel.xz-dark .xz-footer .disc{color:var(--xz-muted);}',
-      '#xz-panel.xz-dark .xz-opt-title,#xz-panel.xz-dark .close{color:var(--xz-muted);}',
-      '#xz-panel.xz-dark .close:hover{background:var(--xz-surface);color:var(--xz-text);}',
-      '#xz-panel.xz-dark .tabs,#xz-panel.xz-dark .xz-home-guide,#xz-panel.xz-dark .xz-log{background:var(--xz-soft);border-color:var(--xz-line);}',
-      '#xz-panel.xz-dark .tab,#xz-panel.xz-dark .xz-home-guide span{color:var(--xz-muted);}',
-      '#xz-panel.xz-dark .tab.active,#xz-panel.xz-dark .xz-context,#xz-panel.xz-dark .xz-home-secondary button,#xz-panel.xz-dark .xz-sub-head .back{background:var(--xz-surface);color:var(--xz-text);border-color:var(--xz-line);}',
-      '#xz-panel.xz-dark .tab:hover{background:var(--xz-surface);color:var(--xz-text);}',
-      '#xz-panel.xz-dark .xz-hint{background:var(--xz-accent-soft);border-color:var(--xz-line);border-left-color:var(--xz-accent);}',
-      '#xz-panel.xz-dark .xz-home-action{background:#1769d2;color:#fff;border-color:#1769d2;}',
-      '#xz-panel.xz-dark .xz-btn-primary,#xz-panel.xz-dark .xz-btn-success{background:#1769d2;color:#fff;}',
-      '#xz-panel.xz-dark .xz-btn-danger{background:var(--xz-surface);color:var(--xz-danger);border-color:#9a5960;}',
-      '#xz-panel.xz-dark input[type=number]{background:var(--xz-surface);border-color:var(--xz-line);color:var(--xz-text);}',
-      '#xz-panel :is(button,input):focus-visible{outline:2px solid var(--xz-accent);outline-offset:2px;}',
-      '@media(max-width:480px){#xz-panel{left:12px!important;right:12px!important;top:12px!important;width:auto;max-width:none;max-height:calc(100dvh - 24px);}#xz-panel .xz-body{padding:14px;}#xz-panel .tab{padding:8px 9px;}#xz-toggle{max-width:calc(100vw - 24px);}}',
-      '@media(prefers-reduced-motion:reduce){#xz-panel,#xz-panel *{transition-duration:.01ms!important;animation-duration:.01ms!important;}}',
-      '</style>',
+      '</style>',,
 
       /* 顶栏 - 可拖动 */
       '<div class="xz-head">',
       '  <button class="close" id="xz-close">&times;</button>',
       '  <div class="brand">',
       '    <img class="logo" src="'+LOGO_URI+'" alt="小蟑螂">',
-      '    <div class="brand-text"><div class="name">莞工小蟑螂</div><div class="ver">优学院全能助手 · v4.1</div></div>',
+      '    <div class="name">莞工小蟑螂</div>',
+      '    <div class="ver">优学院全能助手 · v4.0</div>',
       '  </div>',
-      '  <div class="tabs" role="tablist" aria-label="功能导航">',
+      '  <div class="tabs">',
       showTabs.map(function(t,i){
         var key=t==='首页'?'home':t==='题库导出'?'export':t==='自动刷课'?'auto':t==='读书挂机'?'reading':'about';
-        return '    <button type="button" role="tab" class="tab'+(i===0?' active':'')+'" data-tab="'+key+'" aria-controls="xz-sec-'+key+'" aria-selected="'+(i===0?'true':'false')+'">'+t+'</button>';
+        return '    <div class="tab'+(i===0?' active':'')+'" data-tab="'+key+'">'+t+'</div>';
       }).join(''),
       '  </div>',
       '</div>',
@@ -1733,28 +1572,47 @@
 
       /* ---- 首页 ---- */
       '<div class="sec show" id="xz-sec-home">',
-      '  <div class="xz-context">',
-      '    <div class="xz-context-label"><span class="xz-context-dot'+(isRelevantPage?'':' xz-context-unknown')+'"></span>当前页面</div>',
-      '    <div class="xz-context-title">'+pageName+'</div>',
-      '    <p>'+pageIntro+'</p>',
+      '<div style="text-align:center;padding:4px 0 8px;">',
+      '  <div style="font-size:20px;font-weight:700;color:#1a1a2e;letter-spacing:1px;">莞工小蟑螂</div>',
+      '  <div style="font-size:11px;color:#b0b0c0;margin-top:3px;letter-spacing:.3px;">优学院全能助手 · 请选择功能</div>',
+      '</div>',
+      '<div class="xz-cards">',
+      '  <div class="xz-card'+(IS_COURSE?'':' disabled')+'">',
+      '    <div class="card-title">课件题库导出</div>',
+      '    <div class="card-desc">从课件章节中提取练习题目和答案，支持按章节选择性导出</div>',
+      IS_COURSE
+        ? '    <span class="card-hint">当前已在课件页面，切换到「题库导出」即可使用</span>'
+        : '    <span class="card-hint">请先打开优学院课件页面（ua.dgut.edu.cn）</span>',
       '  </div>',
-      isRelevantPage ? [
-        '  <div class="xz-home-title">推荐操作</div>',
-        '  <button type="button" class="xz-home-action" data-goto="'+(isAutoPage?'auto':'export')+'">',
-        '    <span class="xz-home-action-name">'+(isAutoPage?'设置自动刷课':IS_COURSE?'导出课件题库':'导出训练题库')+'</span>',
-        '    <span class="xz-home-action-desc">'+(isAutoPage?'配置播放、答题与翻页后开始':'查看导出步骤并开始')+'</span>',
-        '    <span class="xz-home-chevron" aria-hidden="true">›</span>',
-        '  </button>',
-        isAutoPage ? '  <div class="xz-home-secondary"><button type="button" data-goto="export">导出课件题库 <span aria-hidden="true">›</span></button><button type="button" data-goto="reading">读书计时 <span aria-hidden="true">›</span></button></div>' : '',
-        '  <div class="xz-home-guide"><strong>使用流程</strong><span>'+(isAutoPage?'确认设置 → 开始运行 → 查看进度':IS_COURSE?'选择章节 → 获取答案 → 下载 JSON':'获取题目 → 获取答案 → 下载 JSON')+'</span></div>'
-      ].join('') : '<div class="xz-home-guide"><strong>使用流程</strong><span>进入课件学习页或题库训练页，重新打开面板即可使用。</span></div>',
+      '  <div class="xz-card'+(IS_TRAINING?'':' disabled')+'">',
+      '    <div class="card-title">训练题库导出</div>',
+      '    <div class="card-desc">从题库训练中导出题目和标准答案</div>',
+      IS_TRAINING
+        ? '    <span class="card-hint">当前已在训练页面，切换到「题库导出」即可使用</span>'
+        : '    <span class="card-hint">请先打开优学院题库训练页面（lms.dgut.edu.cn）</span>',
+      '  </div>',
+      '  <div class="xz-card'+(isAutoPage?'':' disabled')+'">',
+      '    <div class="card-title">自动刷课</div>',
+      '    <div class="card-desc">自动播放视频、答题、翻页，解放双手</div>',
+      isAutoPage
+        ? '    <span class="card-hint">当前已在学习页面，切换到「自动刷课」即可配置</span>'
+        : '    <span class="card-hint">请先打开课件学习页面</span>',
+      '  </div>',
+      '  <div class="xz-card'+(isAutoPage?'':' disabled')+'">',
+      '    <div class="card-title">读书挂机</div>',
+      '    <div class="card-desc">求是读书计划挂机，每本书停留 ≥4 小时自动认证学分</div>',
+      isAutoPage
+        ? '    <span class="card-hint">当前已在学习页面，切换到「读书挂机」即可配置</span>'
+        : '    <span class="card-hint">请先打开优学院课件学习页面</span>',
+      '  </div>',
+      '</div>',
       '</div>',
 
       /* ---- 题库导出 ---- */
       isRelevantPage ? [
         '<div class="sec" id="xz-sec-export">',
         '  <div class="xz-sub-head">',
-        '    <button class="back" data-goto="home" aria-label="返回首页">&larr;</button>',
+        '    <button class="back" data-goto="home">&larr;</button>',
         '    <div class="title">'+(IS_COURSE?'课件题库导出':'训练题库导出')+'</div>',
         '  </div>',
         '  <div class="xz-hint">',
@@ -1769,12 +1627,12 @@
         IS_COURSE
           ? '<button class="xz-btn xz-btn-primary" id="xz-btn-export">开始导出课件题库</button>'
           : '<button class="xz-btn xz-btn-primary" id="xz-btn-export">开始导出训练题库</button>',
-        '  <div id="xz-export-progress" style="display:none;margin-top:10px;" role="status" aria-live="polite">',
+        '  <div id="xz-export-progress" style="display:none;margin-top:10px;">',
         '    <div style="background:rgba(0,0,0,.06);border-radius:6px;height:4px;overflow:hidden;"><div id="xz-progress-bar" style="background:linear-gradient(90deg,#4a90d9,#357abd);height:100%;width:0%;transition:width .3s;border-radius:6px;"></div></div>',
         '    <div style="display:flex;justify-content:space-between;align-items:center;margin-top:5px;"><span id="xz-progress-text" style="font-size:11px;color:#aaa;"></span><button id="xz-btn-cancel" style="background:none;border:1px solid rgba(255,77,79,.2);color:#ff4d4f;font-size:11px;cursor:pointer;padding:3px 10px;border-radius:6px;transition:all .15s;">取消</button></div>',
         '  </div>',
-        '  <div id="xz-export-hint" class="xz-hint xz-export-result" role="status" aria-live="polite"><div class="hint-title"></div><div class="hint-text hp"></div></div>',
-        '  <div class="xz-st" id="xz-st" role="status" aria-live="polite"></div>',
+        '  <div id="xz-export-hint" class="xz-hint xz-export-result"><div class="hint-title"></div><div class="hint-text hp"></div></div>',
+        '  <div class="xz-st" id="xz-st"></div>',
         '  <div class="xz-log" id="xz-log-box"></div>',
         '</div>'
       ].join('') : '',
@@ -1783,7 +1641,7 @@
       isAutoPage ? [
         '<div class="sec" id="xz-sec-auto">',
         '  <div class="xz-sub-head">',
-        '    <button class="back" data-goto="home" aria-label="返回首页">&larr;</button>',
+        '    <button class="back" data-goto="home">&larr;</button>',
         '    <div class="title">自动刷课设置</div>',
         '  </div>',
         '  <div class="xz-hint">',
@@ -1820,7 +1678,12 @@
         '  <div class="xz-row">最大重试: <input type="number" id="xz-max-retry" value="'+cfg.maxRetry+'" step="1" min="1" max="20"> 次</div>',
 
       '  <div class="xz-divider"></div>',
-      '  <div class="xz-log" id="xz-auto-log" style="margin-top:6px;"></div>',
+      '  <button class="xz-btn xz-btn-success" id="xz-btn-auto">开始自动刷课</button>',
+        '  <div id="xz-auto-progress" style="display:none;margin-top:8px;">',
+        '    <div style="background:rgba(0,0,0,.06);border-radius:6px;height:4px;overflow:hidden;"><div id="xz-auto-bar" style="background:linear-gradient(90deg,#52c41a,#389e0d);height:100%;width:0%;transition:width .5s;border-radius:6px;"></div></div>',
+        '    <div id="xz-auto-progress-text" style="font-size:11px;color:#aaa;margin-top:4px;"></div>',
+        '  </div>',
+        '  <div class="xz-log" id="xz-auto-log" style="margin-top:6px;"></div>',
         '</div>'
       ].join('') : '',
 
@@ -1828,12 +1691,12 @@
       isAutoPage ? [
         '<div class="sec" id="xz-sec-reading">',
         '  <div class="xz-sub-head">',
-        '    <button class="back" data-goto="home" aria-label="返回首页">&larr;</button>',
+        '    <button class="back" data-goto="home">&larr;</button>',
         '    <div class="title">读书挂机</div>',
         '  </div>',
         '  <div class="xz-hint">',
         '    <div class="ht">求是读书计划</div>',
-        '    <div class="hp">按设置的时长记录停留并确认翻页，可自动处理暂停弹窗。学习记录和学分以平台实际结果为准。</div>',
+        '    <div class="hp">每本书课件需累计阅读 ≥4 小时方可认证 0.05 学分。本功能自动停留倒计时 + 翻页 + 处理弹窗。</div>',
         '  </div>',
         '',
         '  <div style="text-align:center;margin:12px 0 4px;">',
@@ -1884,16 +1747,10 @@
       /* ---- 关于页 ---- */
       '<div class="sec" id="xz-sec-about">',
       '  <div class="xz-sub-head">',
-      '    <button class="back" data-goto="home" aria-label="返回首页">&larr;</button>',
+      '    <button class="back" data-goto="home">&larr;</button>',
       '    <div class="title">关于</div>',
       '  </div>',
       '  <div class="xz-log-list">',
-      '    <div class="ver">v4.1 <span class="date">2026-09-28</span></div>',
-      '    <ul>',
-      '      <li>按当前页面推荐可用功能，首页操作可直接进入设置或导出</li>',
-      '      <li>统一面板、章节选择和运行日志的冷色界面与交互反馈</li>',
-      '      <li>补齐键盘焦点、窄屏布局及减少动态效果支持</li>',
-      '    </ul>',
       '    <div class="ver">v4.0 <span class="date">2026-09-27</span></div>',
       '    <ul>',
       '      <li>翻页后确认活动页或题目标识变化，15秒内无变化则重试并暂停</li>',
@@ -1985,15 +1842,6 @@
       '</div>',
 
       '</div>', /* xz-body */
-      isAutoPage ? [
-        '<div class="xz-action-dock" id="xz-auto-dock">',
-        '  <button class="xz-btn xz-btn-success" id="xz-btn-auto">开始自动刷课</button>',
-        '  <div id="xz-auto-progress" style="display:none;" role="status" aria-live="polite">',
-        '    <div style="background:rgba(0,0,0,.06);border-radius:6px;height:4px;overflow:hidden;"><div id="xz-auto-bar" style="height:100%;width:0%;transition:width .5s;border-radius:6px;"></div></div>',
-        '    <div id="xz-auto-progress-text" style="font-size:11px;color:#5c6b7b;margin-top:5px;line-height:1.4;"></div>',
-        '  </div>',
-        '</div>'
-      ].join('') : '',
     ].join('');
 
     document.body.appendChild(panel);
@@ -2112,23 +1960,19 @@
       if(hList)hList.innerHTML=renderHistory();
     };
 
-    /* 导航：顶栏、首页操作和返回按钮共用同一入口 */
-    function goToTab(key) {
-        var tab=panel.querySelector('.tab[data-tab="'+key+'"]');
-        if(!tab)return;
-        panel.classList.toggle('xz-view-auto',key==='auto');
-        panel.querySelectorAll('.tab').forEach(function(t){t.classList.toggle('active',t===tab);t.setAttribute('aria-selected',t===tab?'true':'false');});
+    /* Tab 切换 */
+    panel.querySelectorAll('.tab').forEach(function(tab) {
+      tab.onclick = function() {
+        panel.querySelectorAll('.tab').forEach(function(t){t.classList.remove('active')});
+        tab.classList.add('active');
         panel.querySelectorAll('.sec').forEach(function(s){s.classList.remove('show')});
-        var target = document.getElementById('xz-sec-' + key);
+        var target = document.getElementById('xz-sec-' + tab.dataset.tab);
         if (target) target.classList.add('show');
-        panel.querySelector('.xz-body').scrollTop=0;
-        if(key==='about'){
+        if(tab.dataset.tab==='about'){
           var hList=document.getElementById('xz-history-list');
           if(hList)hList.innerHTML=renderHistory();
         }
-    }
-    panel.querySelectorAll('[data-tab],[data-goto]').forEach(function(control){
-      control.onclick=function(){goToTab(control.dataset.tab||control.dataset.goto);};
+      };
     });
 
     /* 暗色模式 */
@@ -2136,12 +1980,11 @@
     var isDark=false;
     try{isDark=localStorage.getItem('xz_dark')==='1';}catch(e){}
     if(isDark)panel.classList.add('xz-dark');
-      if(darkToggle){
-        darkToggle.checked=isDark;
-        darkToggle.onchange=function(){
-          panel.classList.toggle('xz-dark',this.checked);
-          if(Logger.floatEl)Logger.floatEl.classList.toggle('xz-log-dark',this.checked);
-          try{localStorage.setItem('xz_dark',this.checked?'1':'0');}catch(e){}
+    if(darkToggle){
+      darkToggle.checked=isDark;
+      darkToggle.onchange=function(){
+        panel.classList.toggle('xz-dark',this.checked);
+        try{localStorage.setItem('xz_dark',this.checked?'1':'0');}catch(e){}
       };
     }
 
@@ -2199,9 +2042,8 @@
 
     /* ---- 读书挂机逻辑 ---- */
     if (isAutoPage) {
-      var rdState = {running: false, remaining: 14400, totalSeconds: 14400, pages: 0, elapsed: 0, totalElapsed: 0, elapsedAtStart: 0, runStartedAt: 0, deadlineAt: 0, navigating: false, navRetries: 0};
+      var rdState = {running: false, remaining: 14400, totalSeconds: 14400, pages: 0, elapsed: 0, totalElapsed: 0};
       var rdInterval = null;
-      var rdVerifyTimer = null;
       var rdLoggerEl = document.getElementById('xz-reading-log');
       if (rdLoggerEl) Logger.addInline(rdLoggerEl);
 
@@ -2224,10 +2066,10 @@
         var pctEl = document.getElementById('xz-rd-page-pct');
         var pageElapsedEl = document.getElementById('xz-rd-page-elapsed');
         if (rdState.totalSeconds > 0) {
-          var pct = Math.max(0,Math.min(100,Math.round((1 - rdState.remaining / rdState.totalSeconds) * 100)));
+          var pct = Math.round((1 - rdState.remaining / rdState.totalSeconds) * 100);
           if (bar) bar.style.width = pct + '%';
           if (pctEl) pctEl.textContent = pct + '%';
-          var pageElapsed = Math.max(0,rdState.totalSeconds - rdState.remaining);
+          var pageElapsed = rdState.totalSeconds - rdState.remaining;
           if (pageElapsedEl) pageElapsedEl.textContent = '本页已读: ' + Math.floor(pageElapsed/60) + '分' + (pageElapsed%60) + '秒';
         }
         // 当前页名称
@@ -2265,69 +2107,43 @@
         return false;
       }
 
-      function rdRetryNavigation(reason){
-        rdState.navigating=false;
-        rdState.navRetries++;
-        Logger.warn('[读书] 翻页未确认：'+reason+'（'+rdState.navRetries+'/3）');
-        if(rdState.navRetries>=3){
-          rdStop();
-          notify('读书翻页连续失败，已暂停，请检查当前页面');
-          return;
-        }
-        rdState.remaining=10;
-        rdState.deadlineAt=Date.now()+10000;
-        rdUpdateDisplay();
-      }
-
       function rdGoNext() {
-        if(rdState.navigating||!rdState.running)return;
-        var nextBtn=Array.from(document.querySelectorAll('.next-page-btn, .mobile-next-page-btn, .next-btn, .btn-next')).find(function(btn){
-          return isElementVisible(btn)&&!btn.disabled&&btn.getAttribute('aria-disabled')!=='true'&&!btn.classList.contains('disabled');
-        });
-        if(!nextBtn){rdRetryNavigation('未找到可用的下一页按钮');return;}
-        var before=getCurrentPageSignature();
-        rdState.navigating=true;
-        try{nextBtn.click();}catch(e){rdRetryNavigation('点击失败：'+(e.message||e));return;}
-        var startedAt=Date.now();
-        function verify(){
-          rdVerifyTimer=null;
-          if(!rdState.running)return;
-          if(getCurrentPageSignature()!==before){
-            rdState.navigating=false;
-            rdState.navRetries=0;
-            rdState.pages++;
-            rdState.remaining=rdState.totalSeconds;
-            rdState.elapsed=0;
-            rdState.deadlineAt=Date.now()+rdState.totalSeconds*1000;
-            rdUpdateDisplay();
-            Logger.log('[读书] 翻页已确认（累计 '+rdState.pages+' 页，耗时 '+(Date.now()-startedAt)+' ms）');
-            return;
-          }
-          if(Date.now()-startedAt>=15000){rdRetryNavigation('点击后页面未变化');return;}
-          rdVerifyTimer=setTimeout(verify,500);
+        var nextBtn = document.querySelector('.next-page-btn.cursor, .mobile-next-page-btn, .next-btn, .btn-next');
+        if (nextBtn) {
+          nextBtn.click();
+          rdState.pages++;
+          rdState.remaining = rdState.totalSeconds;
+          rdState.elapsed = 0;
+          rdUpdateDisplay();
+          Logger.log('[读书] 已翻到下一页（累计 '+rdState.pages+' 页）');
+          return true;
         }
-        rdVerifyTimer=setTimeout(verify,500);
+        return false;
       }
 
       function rdTick() {
-        if(!rdState.running)return;
-        var now=Date.now();
-        rdState.totalElapsed=rdState.elapsedAtStart+Math.floor((now-rdState.runStartedAt)/1000);
-        rdState.remaining=Math.max(0,Math.ceil((rdState.deadlineAt-now)/1000));
-        rdState.elapsed=Math.max(0,rdState.totalSeconds-rdState.remaining);
-        rdUpdateDisplay();
         var autoDismiss = document.getElementById('xz-rd-auto-dismiss');
         if (autoDismiss && autoDismiss.checked) {
           rdDismissModals();
         }
-        if(rdState.navigating||rdState.remaining>0)return;
-        var autoNext = document.getElementById('xz-rd-auto-next');
-        if (autoNext && autoNext.checked) {
-          Logger.log('[读书] 倒计时结束，尝试翻页...');
-          rdGoNext();
+
+        if (rdState.remaining > 0) {
+          rdState.remaining--;
+          rdState.elapsed++;
+          rdState.totalElapsed++;
+          rdUpdateDisplay();
         } else {
-          Logger.log('[读书] 倒计时结束，请手动翻页');
-          rdStop();
+          var autoNext = document.getElementById('xz-rd-auto-next');
+          if (autoNext && autoNext.checked) {
+            Logger.log('[读书] 倒计时结束，尝试翻页...');
+            if (!rdGoNext()) {
+              Logger.log('[读书] 未找到翻页按钮，10秒后重试');
+              rdState.remaining = 10;
+            }
+          } else {
+            Logger.log('[读书] 倒计时结束，请手动翻页');
+            rdStop();
+          }
         }
       }
 
@@ -2342,11 +2158,6 @@
         }
         rdState.remaining = rdState.totalSeconds;
         rdState.running = true;
-        rdState.navigating = false;
-        rdState.navRetries = 0;
-        rdState.elapsedAtStart = rdState.totalElapsed;
-        rdState.runStartedAt = Date.now();
-        rdState.deadlineAt = rdState.runStartedAt + rdState.totalSeconds*1000;
         rdInterval = setInterval(rdTick, 1000);
         var btn = document.getElementById('xz-btn-reading');
         if (btn) { btn.textContent = '暂停挂机'; btn.className = 'xz-btn xz-btn-danger'; }
@@ -2354,11 +2165,8 @@
       }
 
       function rdStop() {
-        if(rdState.running)rdState.totalElapsed=rdState.elapsedAtStart+Math.floor((Date.now()-rdState.runStartedAt)/1000);
         rdState.running = false;
-        rdState.navigating = false;
         if (rdInterval) { clearInterval(rdInterval); rdInterval = null; }
-        if (rdVerifyTimer) { clearTimeout(rdVerifyTimer); rdVerifyTimer = null; }
         var btn = document.getElementById('xz-btn-reading');
         if (btn) { btn.textContent = '开始挂机'; btn.className = 'xz-btn xz-btn-success'; }
       }
@@ -2368,10 +2176,6 @@
         rdState.pages = 0;
         rdState.elapsed = 0;
         rdState.totalElapsed = 0;
-        rdState.elapsedAtStart = 0;
-        rdState.runStartedAt = 0;
-        rdState.deadlineAt = 0;
-        rdState.navRetries = 0;
         rdState.remaining = parseInt(document.getElementById('xz-rd-h').value || 4) * 3600 + parseInt(document.getElementById('xz-rd-m').value || 0) * 60 + parseInt(document.getElementById('xz-rd-s').value || 0);
         rdUpdateDisplay();
         Logger.log('[读书] 已重置');
@@ -2393,11 +2197,8 @@
           var h = parseInt(document.getElementById('xz-rd-h').value) || 0;
           var m = parseInt(document.getElementById('xz-rd-m').value) || 0;
           var s = parseInt(document.getElementById('xz-rd-s').value) || 0;
-          var seconds = h * 3600 + m * 60 + s;
-          if(seconds<=0){Logger.warn('[读书] 请设置大于 0 秒的停留时间');return;}
-          rdState.totalSeconds = seconds;
-          rdState.remaining = rdState.totalSeconds;
-          if(rdState.running)rdState.deadlineAt=Date.now()+rdState.totalSeconds*1000;
+          rdState.totalSeconds = h * 3600 + m * 60 + s;
+          if (!rdState.running) rdState.remaining = rdState.totalSeconds;
           rdUpdateDisplay();
           Logger.log('[读书] 时间已设置为 '+h+'时'+m+'分'+s+'秒');
         };
@@ -2447,8 +2248,8 @@
         if (!autoState.paused) {
           timerRegistry.clearAll();
           _nextPageTimerId = null;
-          _modalRetryTimerId = null;
-          resetVideoTracking();
+          _noVideoTimerId = null;
+          _videoStates = [];
           autoState.navigating = false;
           autoState.answerInProgress = false;
           autoState.navigationReady = false;
@@ -2456,7 +2257,6 @@
           autoState.lastAnsweredSignature = '';
           autoState.currentQuestionIds = [];
           autoState.retry = 0;
-          autoState.pauseReason = '';
           _cfgCache = null;
           autoState.startTime=Date.now();
           autoState.pagesDone=0;
@@ -2470,13 +2270,12 @@
         } else {
           timerRegistry.clearAll();
           _nextPageTimerId = null;
-          _modalRetryTimerId = null;
-          resetVideoTracking();
+          _noVideoTimerId = null;
+          _videoStates = [];
           autoState.navigating = false;
           autoState.answerInProgress = false;
           autoState.navigationReady = false;
           autoState.currentQuestionIds = [];
-          autoState.pauseReason = '手动暂停';
           stopAntiIdle();
           // 恢复所有视频倍速为 1x
           document.querySelectorAll('video').forEach(function(v) { v.playbackRate = 1; });
@@ -2593,12 +2392,12 @@
       if (document.getElementById('xz-panel')) { _inited=true; return; }
       createUI();
       _inited=true;
-      console.log('[莞工小蟑螂] v4.1 已加载');
+      console.log('[莞工小蟑螂] v4.0 已加载');
       var lastVer='';
       try{lastVer=localStorage.getItem('xz_last_ver')||'';}catch(e){}
-      if(lastVer!=='4.1'){
-        try{localStorage.setItem('xz_last_ver','4.1');}catch(e){}
-        notify('莞工小蟑螂 v4.1 已加载');
+      if(lastVer!=='4.0'){
+        try{localStorage.setItem('xz_last_ver','4.0');}catch(e){}
+        notify('莞工小蟑螂 v4.0 已加载');
       }
     } catch (e) { _inited=false; console.error('[莞工小蟑螂]', e); }
   }
