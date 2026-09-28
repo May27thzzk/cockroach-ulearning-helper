@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         莞工小蟑螂 - 优学院全能助手
 // @namespace    https://github.com/May27thzzk/cockroach-ulearning-helper
-// @version      4.1.2
+// @version      4.1.3
 // @description  优学院课件题库导出 + 训练题库导出 + 自动静音播放/答题/翻页，莞工小蟑螂出品
 // @author       莞工小蟑螂
 // @match        https://ua.dgut.edu.cn/*
@@ -24,7 +24,9 @@
 
   var HOST = location.hostname;
   var IS_DGUT = HOST.includes('dgut.edu.cn');
-  var API_HOST = IS_DGUT ? 'https://api.dgut.edu.cn' : 'https://api.ulearning.cn';
+  // 学校新版路由把 /uaapi 代理在 ua.dgut.edu.cn，同域接口由平台配置或 urlStyle=2 指示。
+  var DGUT_UA_PROXY = IS_DGUT && (getCookie('urlStyle')==='2' || /^https:\/\/ua\.dgut\.edu\.cn\/uaapi\/?$/i.test(window.CONFIG_API_HOST||''));
+  var API_HOST = IS_DGUT ? (DGUT_UA_PROXY ? 'https://ua.dgut.edu.cn' : 'https://api.dgut.edu.cn') : 'https://api.ulearning.cn';
   var HASH_ROUTE = (location.hash || '').split('?')[0].toLowerCase();
   var IS_COURSE = (HOST.startsWith('ua.') && /\/learnCourse\//i.test(location.pathname)) || /^#\/course\/(?:textbook|learncourse)(?:\/|$)/.test(HASH_ROUTE);
   var IS_TRAINING = HOST.startsWith('lms.') && /^#\/questiontrain\/practice(?:\/|$)/.test(HASH_ROUTE);
@@ -588,6 +590,7 @@
     paused: true,
     navigating: false,
     answerInProgress: false,
+    runId: 0,
     navigationReady: false,
     navigationBlockedSignature: '',
     currentQuestionIds: [],
@@ -699,6 +702,7 @@
     _videoStates=[];
   }
   function pauseAutoFlow(reason){
+    autoState.runId++;
     autoState.paused=true;
     autoState.navigating=false;
     autoState.answerInProgress=false;
@@ -732,6 +736,7 @@
       // 检测 URL 变化（用户手动切页面），重置答题状态
       if (location.href !== lastUrl) {
         lastUrl = location.href;
+        autoState.runId++;
         autoState.answerInProgress = false;
         autoState.navigationReady = false;
         autoState.navigationBlockedSignature = '';
@@ -894,10 +899,19 @@
     if (autoState.paused || autoState.answerInProgress) return;
     var cfg = getCfg();
     if (!cfg.autoAnswer) return;
-    var panels = document.querySelectorAll('.question-wrapper');
+    var panels = Array.from(document.querySelectorAll('.question-wrapper')).filter(isElementVisible);
     if (!panels.length) return;
     var pageSignature = getCurrentPageSignature();
     if (autoState.lastAnsweredSignature === pageSignature) return;
+    // 已完成的题目页只允许前进，不能再次填答或要求不存在的提交按钮。
+    if(panels.every(function(panel){return panel.classList.contains('finished');})){
+      autoState.lastAnsweredSignature=pageSignature;
+      autoState.lastActivityAt=Date.now();
+      Logger.log('当前页题目已完成，跳过重复提交');
+      if(cfg.autoNext)scheduleAutoGoNext(Math.max(500,cfg.stayTime*1000));
+      else pauseAutoFlow('当前页题目已完成，请手动翻页');
+      return;
+    }
     var pageItems = document.querySelectorAll('.page-item');
     var parentId = '';
 
@@ -916,7 +930,7 @@
     }
 
     var qIds = [];
-    panels.forEach(function(p) {
+    panels.filter(function(p){return !p.classList.contains('finished');}).forEach(function(p) {
       var id = p.getAttribute('id') || '';
       if (id.startsWith('question')) qIds.push(id.replace('question', ''));
     });
@@ -934,12 +948,14 @@
     }
 
     autoState.answerInProgress = true;
+    var answerRunId = autoState.runId;
+    function answerRunActive(){return !autoState.paused && autoState.runId===answerRunId && getCurrentPageSignature()===pageSignature;}
     autoState.navigationReady = false;
     Logger.log('检测到测验，开始处理 ' + qIds.length + ' 道题...');
     var idx = 0;
     var failed = [];
     async function next() {
-      if (autoState.paused) { autoState.answerInProgress = false; return; }
+      if (!answerRunActive()) { if(autoState.runId===answerRunId)autoState.answerInProgress = false; return; }
       if (idx >= qIds.length) {
         autoState.lastAnsweredSignature = pageSignature;
         if (failed.length) {
@@ -953,7 +969,7 @@
         Logger.log(qIds.length + ' 道题均已填入');
         var cfg2 = getCfg();
         timerRegistry.set(function() {
-          if (autoState.paused) { autoState.answerInProgress = false; return; }
+          if (!answerRunActive()) { if(autoState.runId===answerRunId)autoState.answerInProgress = false; return; }
           if (cfg2.autoSubmit) {
             var submitBtns = Array.from(document.querySelectorAll('.btn-submit'));
             var submitBtn = submitBtns.find(function(btn) {
@@ -999,15 +1015,18 @@
         try {
           failureStage = '答案请求';
           var response = await api('GET', path, null, 1);
+          if(!answerRunActive()){if(autoState.runId===answerRunId)autoState.answerInProgress=false;return;}
           failureStage = '答案解析';
           var answers = getQuizAnswers(response);
           if (!answers.length) throw new Error('接口未返回可用答案');
           failureStage = '答案写入';
           if (!(await autoFillAnswer(qId, answers))) throw new Error('答案未能写入题目');
+          if(!answerRunActive()){if(autoState.runId===answerRunId)autoState.answerInProgress=false;return;}
           filled = true;
           autoState.lastActivityAt=Date.now();
           Logger.log('题目 ' + qId + ' 已填入');
         } catch (e) {
+          if(!answerRunActive()){if(autoState.runId===answerRunId)autoState.answerInProgress=false;return;}
           errorText = e && e.message ? e.message : String(e);
           if (attempt < 2) await wait(500 * attempt);
         }
@@ -1017,6 +1036,7 @@
         Logger.log('题目 ' + qId + ' 处理失败 [阶段: ' + failureStage + ']：' + errorText);
       }
       await wait(jitteredDelay(getCfg().answerDelay || 500));
+      if(!answerRunActive()){if(autoState.runId===answerRunId)autoState.answerInProgress=false;return;}
       idx++;
       next();
     }
@@ -1061,7 +1081,8 @@
       var descriptor = Object.getOwnPropertyDescriptor(proto, 'value');
       if (descriptor && descriptor.set) descriptor.set.call(el, val);
       else el.value = val;
-    } else if ('value' in el) el.value = val;
+    } else if (el.isContentEditable) el.textContent = val;
+    else if ('value' in el) el.value = val;
     else return false;
     el.dispatchEvent(new Event('input', {bubbles:true}));
     el.dispatchEvent(new Event('change', {bubbles:true}));
@@ -1080,7 +1101,7 @@
         }
       }
     } catch(e) {}
-    return String(el.value) === String(val);
+    return String(el.isContentEditable ? el.textContent : el.value) === String(val);
   }
 
   async function autoFillAnswer(qId, answers) {
@@ -1146,27 +1167,29 @@
       }
       return false;
     } else if (typeText.includes('填空')) {
-      var inputs = el.querySelectorAll('textarea, .blank-input, input[type="text"]');
+      // .blank-input may be a container around an input; count editable fields only.
+      var inputs = el.querySelectorAll('textarea, input[type="text"], input:not([type]), [contenteditable="true"]');
       if (!inputs.length) return false;
       if (inputs.length > 1 && answers.length === 1) {
         var split = answers[0].split(/\s*(?:\|\||\||;|；|\n)\s*/).filter(Boolean);
         if (split.length === inputs.length) answers = split;
       }
-      if (answers.length < inputs.length) return false;
+      if (answers.length !== inputs.length) return false;
       var allSet = true;
       for (var i = 0; i < inputs.length; i++) {
         var val = shouldAnswerCorrect ? normalizeAnswerText(answers[i]) : '略';
-        if (!_koSetValue(inputs[i], val) || !String(inputs[i].value||'').trim()) allSet = false;
+        if (!_koSetValue(inputs[i], val) || !String(inputs[i].isContentEditable ? inputs[i].textContent : inputs[i].value || '').trim()) allSet = false;
       }
       if (allSet) { autoState.questionsDone++; if(shouldAnswerCorrect)autoState.questionsCorrect++; }
       return allSet;
     } else if (typeText.includes('问答') || typeText.includes('简答') || typeText.includes('论述') || typeText.includes('综合')) {
-      var textareas = el.querySelectorAll('textarea, input[type="text"].form-control');
+      var textareas = el.querySelectorAll('textarea, input[type="text"].form-control, [contenteditable="true"]');
       if (!textareas.length) return false;
+      if (textareas.length > 1 && answers.length !== textareas.length) return false;
       var allEssaySet = true;
       for (var j = 0; j < textareas.length; j++) {
-        var essay = normalizeAnswerText(answers[j] || answers[0]);
-        if (!essay || !_koSetValue(textareas[j], essay) || !String(textareas[j].value||'').trim()) allEssaySet = false;
+        var essay = textareas.length === 1 ? answers.join('\n') : normalizeAnswerText(answers[j]);
+        if (!essay || !_koSetValue(textareas[j], essay) || !String(textareas[j].isContentEditable ? textareas[j].textContent : textareas[j].value || '').trim()) allEssaySet = false;
       }
       if (allEssaySet) { autoState.questionsDone++; if(shouldAnswerCorrect)autoState.questionsCorrect++; }
       return allEssaySet;
@@ -1766,7 +1789,7 @@
       '  <button class="close" id="xz-close">&times;</button>',
       '  <div class="brand">',
       '    <img class="logo" src="'+LOGO_URI+'" alt="小蟑螂">',
-      '    <div class="brand-text"><div class="name">莞工小蟑螂</div><div class="ver">优学院全能助手 · v4.1.2</div></div>',
+      '    <div class="brand-text"><div class="name">莞工小蟑螂</div><div class="ver">优学院全能助手 · v4.1.3</div></div>',
       '  </div>',
       '  <div class="tabs" role="tablist" aria-label="功能导航">',
       showTabs.map(function(t,i){
@@ -1936,6 +1959,12 @@
       '    <div class="title">关于</div>',
       '  </div>',
       '  <div class="xz-log-list">',
+      '    <div class="ver">v4.1.3 <span class="date">2026-09-29</span></div>',
+      '    <ul>',
+      '      <li>适配莞工学习页的同源 UA API，修复答案接口返回网页导致的卡滞</li>',
+      '      <li>已完成题目只继续翻页；多空和简答按输入框数量校验，避免重复提交或截断</li>',
+      '      <li>暂停或切页后丢弃过期答案请求的结果</li>',
+      '    </ul>',
       '    <div class="ver">v4.1.2 <span class="date">2026-09-28</span></div>',
       '    <ul>',
       '      <li>修复跨专题统计弹窗未被识别，自动刷课和读书流程可继续前进</li>',
@@ -2483,6 +2512,7 @@
 
       btnAuto.onclick = function() {
         autoState.paused = !autoState.paused;
+        autoState.runId++;
 
         var c = {
           rate: (function(){var v=parseFloat(document.getElementById('xz-rate').value);return(isNaN(v)||v<1)?1.5:v;})(),
@@ -2649,12 +2679,12 @@
       if (document.getElementById('xz-panel')) { _inited=true; return; }
       createUI();
       _inited=true;
-      console.log('[莞工小蟑螂] v4.1.2 已加载');
+      console.log('[莞工小蟑螂] v4.1.3 已加载');
       var lastVer='';
       try{lastVer=localStorage.getItem('xz_last_ver')||'';}catch(e){}
-      if(lastVer!=='4.1.2'){
-        try{localStorage.setItem('xz_last_ver','4.1.2');}catch(e){}
-        notify('莞工小蟑螂 v4.1.2 已加载');
+      if(lastVer!=='4.1.3'){
+        try{localStorage.setItem('xz_last_ver','4.1.3');}catch(e){}
+        notify('莞工小蟑螂 v4.1.3 已加载');
       }
     } catch (e) { _inited=false; console.error('[莞工小蟑螂]', e); }
   }

@@ -49,6 +49,7 @@ Object.defineProperty(document, 'cookie', {
 if (window.__mockLocation.hash.indexOf('/questionTrain/practice/') >= 0) {
   document.cookie = 'USERINFO=%7B%22userId%22%3A%22mock-user%22%7D; path=/';
 }
+if (acceptanceConfig.urlStyle2) document.cookie = 'urlStyle=2; path=/';
 Object.defineProperty(window, 'localStorage', {
   configurable: true,
   value: {
@@ -65,10 +66,10 @@ const isNavigationMode = ['navigation', 'navigation-noop', 'navigation-transient
 if ((acceptanceConfig.mode && acceptanceConfig.mode.indexOf('auto-') === 0) || isNavigationMode || ['video-sequence', 'video-summary', 'video-stall'].indexOf(acceptanceConfig.mode) >= 0) {
   window.__acceptance.storage = window.__acceptance.storage || {};
   window.__acceptance.storage.xz_autocfg = JSON.stringify({
-    rate: 1.5, stayTime: (isNavigationMode || ['video-sequence', 'video-summary'].indexOf(acceptanceConfig.mode) >= 0) ? 0 : 5,
+    rate: 1.5, stayTime: (isNavigationMode || acceptanceConfig.mode === 'auto-completed' || ['video-sequence', 'video-summary'].indexOf(acceptanceConfig.mode) >= 0) ? 0 : 5,
     autoMute: false, autoPlay: isNavigationMode || ['video-sequence', 'video-summary', 'video-stall'].indexOf(acceptanceConfig.mode) >= 0,
     autoAnswer: !(isNavigationMode || ['video-sequence', 'video-summary', 'video-stall'].indexOf(acceptanceConfig.mode) >= 0), autoSubmit: !isNavigationMode,
-    autoNext: isNavigationMode || ['video-sequence', 'video-summary', 'video-stall'].indexOf(acceptanceConfig.mode) >= 0, maxRetry: 1,
+    autoNext: isNavigationMode || acceptanceConfig.mode === 'auto-completed' || ['video-sequence', 'video-summary', 'video-stall'].indexOf(acceptanceConfig.mode) >= 0, maxRetry: 1,
     accuracyMin: 100, accuracyMax: 100, answerDelay: 100
   });
 }
@@ -152,10 +153,10 @@ window.GM_xmlhttpRequest = function (options) {
     return { abort: function () {} };
   }
 
-  const delayedAnswer = acceptanceConfig.mode === 'cancel-export' && /\/questionAnswer\//i.test(url.pathname);
+  const delayedAnswer = ['cancel-export', 'auto-pause-pending'].indexOf(acceptanceConfig.mode) >= 0 && /\/questionAnswer\//i.test(url.pathname);
   const requestTimer = window.setTimeout(function () {
     options.onload({ status: 200, responseText: JSON.stringify(response) });
-  }, delayedAnswer ? 5000 : 0);
+  }, delayedAnswer ? (acceptanceConfig.mode === 'auto-pause-pending' ? 800 : 5000) : 0);
   return { abort: function () {
     window.clearTimeout(requestTimer);
     if (delayedAnswer) {
@@ -387,8 +388,14 @@ window.addEventListener('load', function () {
     }, 20);
     return;
   }
-  if (['navigation', 'navigation-noop', 'navigation-transient', 'auto-samples', 'auto-failure', 'auto-page-switch'].indexOf(state.mode) >= 0) {
+  if (['navigation', 'navigation-noop', 'navigation-transient', 'auto-samples', 'auto-failure', 'auto-page-switch', 'auto-completed', 'auto-pause-pending'].indexOf(state.mode) >= 0) {
     const nextButton = document.querySelector('.next-page-btn');
+    if(state.mode==='auto-completed'&&nextButton)nextButton.addEventListener('click',function(){
+      state.completedPageClicks=(state.completedPageClicks||0)+1;
+      const item=document.querySelector('.page-item');
+      item.id='page-2';
+      item.querySelector('.page-name').textContent='第2页';
+    });
     if (state.mode.indexOf('navigation') === 0 && nextButton) {
       const pages = Array.from(document.querySelectorAll('.page-item'));
       let activeIndex = 0;
@@ -428,6 +435,11 @@ window.addEventListener('load', function () {
     let ticks = 0;
     const pollAuto = window.setInterval(function () {
       ticks += 1;
+      if(state.mode==='auto-pause-pending'&&state.requests.length&&!state.pauseRequestedAt){
+        const stop=document.getElementById('xz-btn-auto');
+        if(stop)stop.click();
+        state.pauseRequestedAt=performance.now();
+      }
       if (state.mode === 'navigation' && state.navigationDurations.length >= 20) {
         if (!state.pauseRequestedAt) {
           const stop = document.getElementById('xz-btn-auto');
@@ -447,15 +459,17 @@ window.addEventListener('load', function () {
       const failed = state.logs.some(function (line) { return line.indexOf('处理失败 [阶段:') >= 0; });
       const navigationFailed = ['navigation-noop', 'navigation-transient'].indexOf(state.mode) >= 0 && state.logs.some(function (line) { return line.indexOf('翻页失败 [阶段: 翻页确认]') >= 0; });
       const pageSwitchReset = state.mode === 'auto-page-switch' && state.logs.some(function (line) { return line.indexOf('检测到页面切换，重置状态') >= 0; });
+      const completedPageMoved=state.mode==='auto-completed'&&state.logs.some(function(line){return line.indexOf('翻页已确认')>=0;});
+      const pendingPaused=state.mode==='auto-pause-pending'&&state.pauseRequestedAt&&performance.now()-state.pauseRequestedAt>1100;
       const timeoutTicks = state.mode.indexOf('navigation') === 0 ? 1800 : 600;
-      if ((state.mode === 'auto-samples' && state.submitCount > 0) || (state.mode === 'auto-failure' && failed) || pageSwitchReset || navigationFailed || ticks > timeoutTicks) {
+      if ((state.mode === 'auto-samples' && state.submitCount > 0) || (state.mode === 'auto-failure' && failed) || pageSwitchReset || completedPageMoved || pendingPaused || navigationFailed || ticks > timeoutTicks) {
         state.timedOut = ticks > timeoutTicks;
         state.navigationCount = state.navigationDurations.length;
         state.navigationWithin15Seconds = state.navigationDurations.filter(function (ms) { return ms <= 15000; }).length;
         state.activePageText = document.querySelector('.page-name.active') && document.querySelector('.page-name.active').textContent.trim();
         state.navigationFailureLogs = state.logs.filter(function (line) { return line.indexOf('翻页失败 [阶段: 翻页确认]') >= 0; });
         state.failureLogs = state.logs.filter(function (line) { return line.indexOf('处理失败 [阶段:') >= 0; });
-        state.answerValues = Array.from(document.querySelectorAll('.answer-field')).map(function (field) { return field.value; });
+        state.answerValues = Array.from(document.querySelectorAll('.answer-field')).map(function (field) { return field.isContentEditable ? field.textContent : field.value; });
         state.selectedChoices = Array.from(document.querySelectorAll('.choice-item input:checked')).length;
         state.selectedJudgeButtons = document.querySelectorAll('.right-btn.selected, .wrong-btn.selected').length;
         window.clearInterval(pollAuto);
@@ -529,14 +543,15 @@ function renderQuestion(question) {
     controls = '<button type="button" class="right-btn" onclick="this.classList.add(\'selected\')">正确</button><button type="button" class="wrong-btn" onclick="this.classList.add(\'selected\')">错误</button>';
   } else if (question.kind === 'blank') {
     if (question.writeFailure) controls = '<div class="blank-input"></div>';
-    else if (!question.missingField) controls = Array.from({ length: question.blankCount || 1 }, () => '<input type="text" class="blank-input answer-field">').join('');
+    else if (!question.missingField) controls = Array.from({ length: question.blankCount || 1 }, () => question.nestedField ? '<div class="blank-input"><input type="text" class="answer-field"></div>' : '<input type="text" class="blank-input answer-field">').join('');
   } else if (question.kind === 'essay') {
-    controls = question.missingField ? '' : '<textarea class="form-control answer-field"></textarea>';
+    controls = question.missingField ? '' : Array.from({ length: question.fieldCount || 1 }, () => question.richField ? '<div contenteditable="true" class="answer-field"></div>' : '<textarea class="form-control answer-field"></textarea>').join('');
   }
-  return `<section class="question-wrapper" ${id}><div class="question-type-tag">${escapeHtml(question.typeTag || '')}</div><div class="question-title">${escapeHtml(question.title || 'Test question')}</div>${controls}</section>`;
+  return `<section class="question-wrapper${question.finished ? ' finished' : ''}" ${id}><div class="question-type-tag">${escapeHtml(question.typeTag || '')}</div><div class="question-title">${escapeHtml(question.title || 'Test question')}</div>${controls}</section>`;
 }
 
 function renderAutoBody(config) {
+  if(config.mode==='auto-completed')return '<div class="course-container"><div class="page-item" id="page-1"><div class="page-name active">第1页</div></div><section class="question-wrapper finished show-answer right" id="questiondone"><div class="question-title">已完成题目</div><button type="button" class="btn-redo">重做</button></section><button type="button" class="next-page-btn">下一页</button></div>';
   if (['reading-sequence','reading-noop','reading-summary'].indexOf(config.mode)>=0) {
     return '<div class="course-container"><div class="page-item" id="page-1"><div class="page-name active">第1页</div></div><button type="button" class="next-page-btn">下一页</button>'+(config.mode==='reading-summary'?'<button type="button" class="btn-submit">提交题目</button>':'')+'</div>';
   }
@@ -572,7 +587,7 @@ function runChrome(host, pagePath, options = {}) {
     acceptance: options.acceptance || { mode: 'export' }
   };
   const wrappedSource = '(function(location){\n' + source + '\n})(window.__mockLocation);';
-  const autoMode = mockLocation.acceptance && ['navigation', 'navigation-noop', 'navigation-transient', 'auto-samples', 'auto-failure', 'auto-page-switch', 'video-sequence', 'video-summary', 'video-stall', 'reading-sequence', 'reading-summary', 'reading-noop', 'log-copy'].indexOf(mockLocation.acceptance.mode) >= 0;
+  const autoMode = mockLocation.acceptance && ['navigation', 'navigation-noop', 'navigation-transient', 'auto-samples', 'auto-failure', 'auto-page-switch', 'auto-completed', 'auto-pause-pending', 'video-sequence', 'video-summary', 'video-stall', 'reading-sequence', 'reading-summary', 'reading-noop', 'log-copy'].indexOf(mockLocation.acceptance.mode) >= 0;
   const bodyMarkup = autoMode ? renderAutoBody(mockLocation.acceptance) : '';
   const duplicateScriptTag = options.duplicateScript ? '<script src="userscript-duplicate.js"></script>' : '';
   const html = `<!doctype html><html><head><meta charset="utf-8">
@@ -613,26 +628,26 @@ ${duplicateScriptTag}
 
 test('userscript syntax and network permissions are declared', () => {
   execFileSync(process.execPath, ['--check', sourcePath], { encoding: 'utf8' });
-  assert.match(source, /^\/\/ @version\s+4\.1\.2$/m);
+  assert.match(source, /^\/\/ @version\s+4\.1\.3$/m);
   assert.match(source, /^\/\/ @connect\s+self$/m);
   assert.match(source, /^\/\/ @connect\s+api\.dgut\.edu\.cn$/m);
   assert.match(source, /^\/\/ @connect\s+api\.ulearning\.cn$/m);
 });
 
-test('all active v4.1.2 userscript copies are byte-identical', () => {
+test('all active v4.1.3 userscript copies are byte-identical', () => {
   const crypto = require('node:crypto');
   const activeCopies = [
     sourcePath,
-    path.join(root, '莞工小蟑螂-优学院全能助手 v4.1.2.user.js'),
+    path.join(root, '莞工小蟑螂-优学院全能助手 v4.1.3.user.js'),
     path.join(root, 'xz-ulearning-helper', '莞工小蟑螂-优学院全能助手.user.js'),
-    path.join(root, 'xz-ulearning-helper', '莞工小蟑螂-优学院全能助手 v4.1.2.user.js')
+    path.join(root, 'xz-ulearning-helper', '莞工小蟑螂-优学院全能助手 v4.1.3.user.js')
   ];
   const hashes = activeCopies.map(file => {
     const copy = fs.readFileSync(file, 'utf8');
-    assert.match(copy, /^\/\/ @version\s+4\.1\.2$/m, file);
+    assert.match(copy, /^\/\/ @version\s+4\.1\.3$/m, file);
     return crypto.createHash('sha256').update(copy, 'utf8').digest('hex');
   });
-  assert.ok(hashes.every(hash => hash === hashes[0]), `v4.1.2 copy hashes differ: ${hashes.join(', ')}`);
+  assert.ok(hashes.every(hash => hash === hashes[0]), `v4.1.3 copy hashes differ: ${hashes.join(', ')}`);
 });
 
 test('home recommends the current page action and returns cleanly to the start', () => {
@@ -758,6 +773,30 @@ test('DGUT learnCourse route exports with the configured API host and query para
   assert.equal(result.downloadQuestions.length, 1);
   assert.equal(result.downloadQuestions[0]['题干'], 'Mock question');
   assert.equal(result.downloadQuestions[0]['答案'], 'A');
+  assert.deepEqual(result.errors, []);
+});
+
+test('DGUT urlStyle=2 uses the same-origin UA API proxy for directory and answers', () => {
+  const result = runChrome('ua.dgut.edu.cn', '/learnCourse/learnCourse.html?courseId=course-A&classId=class-A', {
+    acceptance: { mode: 'export', urlStyle2: true }
+  });
+  assert.equal(result.timedOut, false, JSON.stringify(result));
+  assert.ok(result.requests.length >= 3);
+  assert.ok(result.requests.every(request => new URL(request.url).origin === 'https://ua.dgut.edu.cn'));
+  assert.ok(result.requests.some(request => request.url.includes('/uaapi/questionAnswer/question-A')));
+  assert.equal(result.downloadQuestions.length, 1);
+  assert.deepEqual(result.errors, []);
+});
+
+test('a completed real-style question page advances without requesting or resubmitting an answer', () => {
+  const result = runChrome('ua.dgut.edu.cn', '/learnCourse/learnCourse.html?courseId=course-A', {
+    acceptance: { mode: 'auto-completed' }, virtualTimeBudget: 6000
+  });
+  assert.equal(result.timedOut, false, JSON.stringify(result));
+  assert.equal(result.completedPageClicks, 1);
+  assert.equal(result.submitCount, 0);
+  assert.equal(result.requests.length, 0);
+  assert.ok(result.logs.some(line => line.includes('当前页题目已完成，跳过重复提交')));
   assert.deepEqual(result.errors, []);
 });
 
@@ -997,13 +1036,69 @@ test('20 answer samples preserve HTML-decoded blanks and full essay text', () =>
   assert.equal(result.errors.length, 0, JSON.stringify(result.errors));
 });
 
-test('10 injected answer and submit failures never submit and log question plus stage', () => {
+test('nested multi-blank fields count only editable controls and preserve answer order', () => {
+  const result = runChrome('ua.dgut.edu.cn', '/learnCourse/learnCourse.html', {
+    acceptance: { mode: 'auto-samples', questions: [
+      { id: 'multi-blank', kind: 'blank', typeTag: '填空题', blankCount: 3, nestedField: true }
+    ], answerResponses: { 'multi-blank': { correctAnswerList: ['甲', '乙', '丙'] } } },
+    virtualTimeBudget: 6000
+  });
+  assert.equal(result.timedOut, false, JSON.stringify(result.logs && result.logs.slice(-8)));
+  assert.deepEqual(result.answerValues, ['甲', '乙', '丙']);
+  assert.equal(result.submitCount, 1);
+  assert.deepEqual(result.failureLogs, []);
+});
+
+test('essay keeps every answer part and supports editable rich-text controls', () => {
+  const result = runChrome('ua.dgut.edu.cn', '/learnCourse/learnCourse.html', {
+    acceptance: { mode: 'auto-samples', questions: [
+      { id: 'essay-parts', kind: 'essay', typeTag: '简答题', richField: true }
+    ], answerResponses: { 'essay-parts': { correctAnswerList: ['第一段', '第二段'] } } },
+    virtualTimeBudget: 6000
+  });
+  assert.equal(result.timedOut, false, JSON.stringify(result.logs && result.logs.slice(-8)));
+  assert.deepEqual(result.answerValues, ['第一段\n第二段']);
+  assert.equal(result.submitCount, 1);
+  assert.deepEqual(result.failureLogs, []);
+});
+
+test('mixed completed and pending questions request only the pending answer', () => {
+  const result = runChrome('ua.dgut.edu.cn', '/learnCourse/learnCourse.html', {
+    acceptance: { mode: 'auto-samples', questions: [
+      { id: 'done', kind: 'choice', typeTag: '单选题', finished: true },
+      { id: 'pending', kind: 'blank', typeTag: '填空题', blankCount: 2 }
+    ], answerResponses: { pending: { correctAnswerList: ['前', '后'] } } },
+    virtualTimeBudget: 6000
+  });
+  assert.equal(result.timedOut, false, JSON.stringify(result.logs && result.logs.slice(-8)));
+  assert.deepEqual(result.answerValues, ['前', '后']);
+  assert.equal(result.submitCount, 1);
+  assert.equal(result.requests.filter(request => request.url.includes('/questionAnswer/')).length, 1);
+  assert.ok(result.requests.some(request => request.url.includes('/questionAnswer/pending')));
+});
+
+test('pausing during an answer request leaves the page unchanged after the response arrives', () => {
+  const result = runChrome('ua.dgut.edu.cn', '/learnCourse/learnCourse.html', {
+    acceptance: { mode: 'auto-pause-pending', questions: [
+      { id: 'late-answer', kind: 'blank', typeTag: '填空题', blankCount: 2 }
+    ], answerResponses: { 'late-answer': { correctAnswerList: ['甲', '乙'] } } },
+    virtualTimeBudget: 6000
+  });
+  assert.equal(result.timedOut, false, JSON.stringify(result.logs && result.logs.slice(-8)));
+  assert.deepEqual(result.answerValues, ['', '']);
+  assert.equal(result.submitCount, 0);
+  assert.ok(result.pauseRequestedAt > 0);
+});
+
+test('12 injected answer and submit failures never submit and log question plus stage', () => {
   const scenarios = [
     { name: 'request failure', question: { id: 'Q1', kind: 'choice', typeTag: '单选题' }, failQuestionIds: ['Q1'], stage: '答案请求' },
     { name: 'empty answer', question: { id: 'Q1', kind: 'choice', typeTag: '单选题' }, answerResponses: { Q1: { correctAnswerList: [] } }, stage: '答案解析' },
     { name: 'unknown type', question: { id: 'Q1', kind: 'unknown', typeTag: '排序题' }, stage: '答案写入' },
     { name: 'missing answer field', question: { id: 'Q1', kind: 'blank', typeTag: '填空题', missingField: true }, stage: '答案写入' },
     { name: 'field write failure', question: { id: 'Q1', kind: 'blank', typeTag: '填空题', writeFailure: true }, stage: '答案写入' },
+    { name: 'multi-blank answer count mismatch', question: { id: 'Q1', kind: 'blank', typeTag: '填空题', blankCount: 2 }, answerResponses: { Q1: { correctAnswerList: ['只有一个'] } }, stage: '答案写入' },
+    { name: 'essay field count mismatch', question: { id: 'Q1', kind: 'essay', typeTag: '简答题', fieldCount: 2 }, answerResponses: { Q1: { correctAnswerList: ['只有一段'] } }, stage: '答案写入' },
     { name: 'unmatched choice', question: { id: 'Q1', kind: 'choice', typeTag: '单选题' }, answerResponses: { Q1: { correctAnswerList: ['Z'] } }, stage: '答案写入' },
     { name: 'missing submit button', question: { id: 'Q1', kind: 'choice', typeTag: '单选题' }, submitButton: 'missing', stage: '提交按钮' },
     { name: 'disabled submit button', question: { id: 'Q1', kind: 'choice', typeTag: '单选题' }, submitButton: 'disabled', stage: '提交按钮' },
