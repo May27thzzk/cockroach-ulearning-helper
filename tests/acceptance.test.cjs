@@ -12,7 +12,7 @@ const source = fs.readFileSync(sourcePath, 'utf8');
 const chromePath = process.env.CHROME_BIN || 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe';
 
 const fixtureScript = String.raw`
-window.__acceptance = { requests: [], downloadName: '', downloadText: '', authSeen: false, logs: [], errors: [], submitCount: 0, navigationClickAt: 0, navigationDurations: [], abortCount: 0, storageWrites: 0 };
+window.__acceptance = { requests: [], downloadName: '', downloadText: '', authSeen: false, logs: [], errors: [], submitCount: 0, navigationClickAt: 0, navigationDurations: [], abortCount: 0, storageWrites: 0, chapterRequestsCompleted: 0, activeChapterRequests: 0, maxConcurrentChapterRequests: 0, firstNextAt: 0, lastChapterResponseAt: 0 };
 const originalConsoleLog = console.log.bind(console);
 console.log = function () {
   const message = Array.from(arguments).map(String).join(' ');
@@ -33,6 +33,11 @@ Object.defineProperty(navigator, 'clipboard', { configurable: true, value: {
 const acceptanceConfig = window.__mockLocation.acceptance || {};
 window.__acceptance.mode = acceptanceConfig.mode || 'export';
 if (acceptanceConfig.darkMode) window.__acceptance.storage = { xz_dark: '1' };
+if (acceptanceConfig.storage) window.__acceptance.storage = Object.assign(window.__acceptance.storage || {}, acceptanceConfig.storage);
+if (acceptanceConfig.lmsTextbookId) window.requirejs = function (name) {
+  if (name !== 'knockout') throw new Error('Unexpected AMD module');
+  return { contextFor: function () { return { $component: { currentTextbook: function () { return { id: function () { return acceptanceConfig.lmsTextbookId; } }; } } }; } };
+};
 
 const cookieJar = acceptanceConfig.authMode === 'none' || acceptanceConfig.authMode === 'lowercase-header' ? {}
   : acceptanceConfig.authMode === 'ua-only' ? { UA_AUTHORIZATION: 'mock-ua-auth' }
@@ -62,7 +67,7 @@ Object.defineProperty(window, 'localStorage', {
     removeItem: function (key) { if (window.__acceptance.storage) delete window.__acceptance.storage[key]; }
   }
 });
-const isNavigationMode = ['navigation', 'navigation-noop', 'navigation-transient'].indexOf(acceptanceConfig.mode) >= 0;
+const isNavigationMode = ['navigation', 'navigation-noop', 'navigation-transient', 'navigation-delayed-scan', 'navigation-preload-error', 'navigation-slow-transition', 'auto-alert-modal'].indexOf(acceptanceConfig.mode) >= 0;
 if ((acceptanceConfig.mode && acceptanceConfig.mode.indexOf('auto-') === 0) || isNavigationMode || ['video-sequence', 'video-summary', 'video-stall'].indexOf(acceptanceConfig.mode) >= 0) {
   window.__acceptance.storage = window.__acceptance.storage || {};
   window.__acceptance.storage.xz_autocfg = JSON.stringify({
@@ -101,6 +106,10 @@ window.GM_xmlhttpRequest = function (options) {
     window.setTimeout(function () { options.onload({ status: 200, responseText: '{invalid json' }); }, 0);
     return { abort: function () {} };
   }
+  if (isDirectoryRequest && acceptanceConfig.mode === 'html-fallback' && url.hostname === 'api.dgut.edu.cn') {
+    window.setTimeout(function () { options.onload({ status: 200, responseText: '<!doctype html><html><body>not api</body></html>' }); }, 0);
+    return { abort: function () {} };
+  }
   if (isDirectoryRequest && acceptanceConfig.mode === 'retry-server' && directoryAttempt === 1) {
     window.setTimeout(function () { options.onload({ status: 503, responseText: '{"error":"Mock unavailable"}' }); }, 0);
     return { abort: function () {} };
@@ -112,9 +121,10 @@ window.GM_xmlhttpRequest = function (options) {
 
   let response;
   if (isDirectoryRequest) {
-    response = { data: { coursename: 'Acceptance Course', chapters: [
-      { nodeid: 'chapter-A', items: [{ title: 'Chapter 1', itemid: 'item-A' }] }
-    ] } };
+    const chapterCount = Math.max(1, Math.min(40, Number(acceptanceConfig.scanChapterCount) || 1));
+    response = { data: { coursename: 'Acceptance Course', chapters: Array.from({ length: chapterCount }, (_, index) => (
+      { nodeid: 'chapter-' + String.fromCharCode(65 + index), items: [{ title: 'Chapter ' + (index + 1), itemid: 'item-A' }] }
+    )) } };
   } else if (url.pathname.indexOf('/uaapi/wholepage/chapter/stu/') >= 0 || /\/learnCourse\/getWholeChapterPageContent$/i.test(url.pathname)) {
     response = acceptanceConfig.mode === 'empty-chapter' ? { data: { wholepageItemDTOList: [] } } : { data: { wholepageItemDTOList: [
       { itemid: 'item-A', wholepageDTOList: [
@@ -127,6 +137,8 @@ window.GM_xmlhttpRequest = function (options) {
         ] }
       ] }
     ] } };
+    if (acceptanceConfig.progressTwoPages || acceptanceConfig.progressThreePages) response.data.wholepageItemDTOList[0].wholepageDTOList.push({ id: 'page-B', contentType: 0, coursepageDTOList: [] });
+    if (acceptanceConfig.progressThreePages) response.data.wholepageItemDTOList[0].wholepageDTOList.push({ id: 'page-C', contentType: 0, coursepageDTOList: [] });
   } else if (url.pathname.indexOf('/uaapi/questionAnswer/') >= 0 || /\/questionAnswer\//i.test(url.pathname)) {
     const questionId = decodeURIComponent(url.pathname.split('/').pop());
     if ((acceptanceConfig.failQuestionIds || []).indexOf(questionId) >= 0) {
@@ -153,12 +165,36 @@ window.GM_xmlhttpRequest = function (options) {
     return { abort: function () {} };
   }
 
+  const isChapterRequest = url.pathname.indexOf('/uaapi/wholepage/chapter/stu/') >= 0 || /\/learnCourse\/getWholeChapterPageContent$/i.test(url.pathname);
+  if (isChapterRequest) {
+    window.__acceptance.activeChapterRequests += 1;
+    window.__acceptance.maxConcurrentChapterRequests = Math.max(window.__acceptance.maxConcurrentChapterRequests, window.__acceptance.activeChapterRequests);
+  }
+  let chapterRequestReleased = false;
+  function releaseChapterRequest() {
+    if (!isChapterRequest || chapterRequestReleased) return;
+    chapterRequestReleased = true;
+    window.__acceptance.activeChapterRequests = Math.max(0, window.__acceptance.activeChapterRequests - 1);
+  }
+  if (isChapterRequest && acceptanceConfig.mode === 'navigation-preload-error') {
+    const failedTimer = window.setTimeout(function () {
+      releaseChapterRequest();
+      options.onload({ status: 503, responseText: '{"error":"Mock chapter unavailable"}' });
+    }, 0);
+    return { abort: function () { window.clearTimeout(failedTimer); releaseChapterRequest(); } };
+  }
   const delayedAnswer = ['cancel-export', 'auto-pause-pending'].indexOf(acceptanceConfig.mode) >= 0 && /\/questionAnswer\//i.test(url.pathname);
   const requestTimer = window.setTimeout(function () {
+    releaseChapterRequest();
+    if (isChapterRequest) {
+      window.__acceptance.chapterRequestsCompleted += 1;
+      window.__acceptance.lastChapterResponseAt = performance.now();
+    }
     options.onload({ status: 200, responseText: JSON.stringify(response) });
-  }, delayedAnswer ? (acceptanceConfig.mode === 'auto-pause-pending' ? 800 : 5000) : 0);
+  }, isChapterRequest ? Math.max(0, Number(acceptanceConfig.chapterDelayMs) || 0) : delayedAnswer ? (acceptanceConfig.mode === 'auto-pause-pending' ? 800 : 5000) : 0);
   return { abort: function () {
     window.clearTimeout(requestTimer);
+    releaseChapterRequest();
     if (delayedAnswer) {
       window.__acceptance.abortCount += 1;
       if (options.onabort) options.onabort();
@@ -180,30 +216,166 @@ const runnerScript = String.raw`
 window.addEventListener('load', function () {
   const state = window.__acceptance;
   const result = document.getElementById('acceptance-result');
+  if(state.mode==='auto-slow-duplicate-submit')document.addEventListener('input',function(event){
+    const group=event.target.closest&&event.target.closest('.exercise-group');
+    if(group&&group.dataset.step==='2'&&!state.secondGroupFirstAnswerAt)state.secondGroupFirstAnswerAt=performance.now();
+  },true);
+  if (state.mode === 'easter') {
+    const panel = document.getElementById('xz-panel');
+    panel.querySelector('.xz-header-about').click();
+    const trigger = panel.querySelector('#xz-easter-trigger');
+    for (let i = 0; i < 6; i += 1) trigger.click();
+    state.hiddenBeforeSeventh = panel.querySelector('#xz-easter').hidden;
+    trigger.click();
+    state.openAfterSeventh = !panel.querySelector('#xz-easter').hidden;
+    panel.querySelector('#xz-easter-mascot').click();
+    state.messageChanged = panel.querySelector('#xz-easter-message').textContent !== '点点我，看看今天的学习运气。';
+    panel.querySelector('#xz-easter-close').click();
+    state.closed = panel.querySelector('#xz-easter').hidden;
+    state.iconStable = panel.querySelector('.brand .logo').getAttribute('src') === panel.querySelector('#xz-easter-mascot img').getAttribute('src');
+    state.nativeCursors = ['.xz-head','.xz-capsule-nav button','#xz-panel-resize','#xz-easter-trigger'].every(selector => getComputedStyle(panel.querySelector(selector)).cursor === 'default');
+    result.textContent = JSON.stringify(state);
+    return;
+  }
+  if (state.mode === 'locate-pending' || state.mode === 'locate-unknown' || state.mode === 'locate-replaced') {
+    const names = [...document.querySelectorAll('.page-item .page-name')];
+    names.forEach(name => name.addEventListener('click', function () {
+      names.forEach(item => item.classList.remove('active'));
+      name.classList.add('active');
+      if (state.mode === 'locate-replaced' && name.textContent.trim() === '第3页') {
+        window.setTimeout(function () {
+          document.querySelector('.course-container').innerHTML = '<div class="page-item" id="page-1"><div class="page-name active complete">第1页</div></div><div class="page-item is-hide" id="page-2"><div class="page-name">第2页</div></div><div class="page-item" id="page-3"><div class="page-name active">第3页</div></div>';
+        }, 80);
+      }
+    }));
+    document.querySelector('#xz-advanced').open = true;
+    document.querySelector('#xz-locate-pending').click();
+    window.setTimeout(function () {
+      state.activeIndex = names.findIndex(name => name.classList.contains('active'));
+      state.locateStatus = document.querySelector('#xz-locate-status').textContent;
+      state.autoStarted = (document.querySelector('#xz-btn-auto')?.textContent || '').includes('暂停');
+      result.textContent = JSON.stringify(state);
+    }, state.mode === 'locate-replaced' ? 900 : 700);
+    return;
+  }
   if (state.mode === 'ui-only') {
     const panel = document.getElementById('xz-panel');
-    const primary = panel && panel.querySelector('.xz-home-action');
-    state.pageName = panel && panel.querySelector('.xz-context-title').textContent.trim();
-    state.primaryAction = primary && primary.querySelector('.xz-home-action-name').textContent.trim();
-    state.tabs = Array.from(panel.querySelectorAll('.tab')).map(function (tab) { return tab.textContent.trim(); });
+    state.pageName = panel && panel.querySelector('.brand .ver').textContent.trim().split(' · ')[0];
+    state.initialView = panel.dataset.view;
+    state.availableViews = Array.from(panel.querySelectorAll('.xz-capsule-nav [data-goto]')).map(function (control) { return control.dataset.goto; });
+    state.selectedView = panel.querySelector('.xz-capsule-nav button.active')?.dataset.goto || null;
     state.layoutWidth = panel && panel.getBoundingClientRect().width;
-    if (primary) {
-      primary.click();
-      state.targetView = panel.querySelector('.sec.show').id;
-      panel.querySelector('.sec.show .back').click();
-      state.backView = panel.querySelector('.sec.show').id;
-    }
+    state.visibleCards = panel.querySelectorAll('.sec.show .xz-card').length;
+    panel.querySelector('.xz-header-about').click();
+    state.aboutView = panel.dataset.view;
+    panel.querySelector('#xz-sec-about [data-goto="previous"]').click();
+    state.returnView = panel.dataset.view;
     if (window.__mockLocation.acceptance.previewTab) {
-      panel.querySelector('.tab[data-tab="' + window.__mockLocation.acceptance.previewTab + '"]').click();
+      panel.querySelector('.xz-capsule-nav [data-goto="' + window.__mockLocation.acceptance.previewTab + '"]').click();
       state.previewView = panel.querySelector('.sec.show').id;
     }
-    state.activeTab = panel.querySelector('.tab.active').dataset.tab;
+    state.activeView = panel.dataset.view;
     state.darkMode = panel.classList.contains('xz-dark');
     result.textContent = JSON.stringify(state);
     return;
   }
+  if (state.mode === 'layout-recovery') {
+    const panel = document.getElementById('xz-panel');
+    const toggle = document.getElementById('xz-toggle');
+    const inside = function (rect) { return rect.left >= 0 && rect.top >= 0 && rect.right <= innerWidth && rect.bottom <= innerHeight; };
+    state.restoredPanelInside = inside(panel.getBoundingClientRect());
+    document.getElementById('xz-close').click();
+    state.restoredToggleInside = inside(toggle.getBoundingClientRect());
+    toggle.click();
+    state.restoredWidth = Math.round(panel.getBoundingClientRect().width);
+    state.restoredHeight = Math.round(panel.getBoundingClientRect().height);
+    const grip = document.getElementById('xz-panel-resize');
+    const beforeResize = panel.getBoundingClientRect();
+    grip.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, pointerId: 1, clientX: beforeResize.left + 5, clientY: beforeResize.bottom - 5 }));
+    grip.dispatchEvent(new PointerEvent('pointermove', { bubbles: true, pointerId: 1, clientX: beforeResize.left - 45, clientY: beforeResize.bottom + 45 }));
+    grip.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, pointerId: 1 }));
+    state.resizedWidth = Math.round(panel.getBoundingClientRect().width);
+    state.resizedHeight = Math.round(panel.getBoundingClientRect().height);
+    state.resizedStyle = {width:panel.style.width,height:panel.style.height,display:getComputedStyle(grip).display,viewport:[innerWidth,innerHeight],before:[beforeResize.left,beforeResize.top,beforeResize.right,beforeResize.bottom]};
+    state.resizedStored = !!localStorage.getItem('xz_panel_size');
+    const head = panel.querySelector('.xz-head');
+    head.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, pointerId: 7, isPrimary: true, button: 0, clientX: 800, clientY: 100 }));
+    head.dispatchEvent(new PointerEvent('pointermove', { bubbles: true, pointerId: 7, isPrimary: true, buttons: 1, clientX: -5000, clientY: -5000 }));
+    const edgeRect = panel.getBoundingClientRect();
+    state.draggedPanelInside = inside(edgeRect);
+    head.dispatchEvent(new PointerEvent('pointermove', { bubbles: true, pointerId: 7, isPrimary: true, buttons: 1, clientX: 900, clientY: 300 }));
+    head.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, pointerId: 7, isPrimary: true, button: 0, clientX: 900, clientY: 300 }));
+    const recoveredRect = panel.getBoundingClientRect();
+    state.draggedPanelRecovered = inside(recoveredRect) && (recoveredRect.left > edgeRect.left || recoveredRect.top > edgeRect.top);
+    panel.querySelector('.xz-header-about').click();
+    document.getElementById('xz-close').click();
+    const toggleRect = toggle.getBoundingClientRect();
+    const toggleStartX = toggleRect.left + 6;
+    const toggleStartY = toggleRect.top + 6;
+    toggle.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, pointerId: 8, isPrimary: true, button: 0, clientX: toggleStartX, clientY: toggleStartY }));
+    toggle.dispatchEvent(new PointerEvent('pointermove', { bubbles: true, pointerId: 8, isPrimary: true, buttons: 1, clientX: -5000, clientY: -5000 }));
+    const toggleEdgeRect = toggle.getBoundingClientRect();
+    state.toggleDraggedToEdgeInside = inside(toggleEdgeRect);
+    toggle.dispatchEvent(new PointerEvent('pointermove', { bubbles: true, pointerId: 8, isPrimary: true, buttons: 1, clientX: toggleStartX + 100, clientY: toggleStartY + 100 }));
+    toggle.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, pointerId: 8, isPrimary: true, button: 0, clientX: toggleStartX + 100, clientY: toggleStartY + 100 }));
+    const toggleRecoveredRect = toggle.getBoundingClientRect();
+    state.toggleDragRecovered = inside(toggleRecoveredRect) && (toggleRecoveredRect.left > toggleEdgeRect.left || toggleRecoveredRect.top > toggleEdgeRect.top);
+    document.getElementById('xz-layout-reset').click();
+    state.resetWidth = Math.round(panel.getBoundingClientRect().width);
+    state.resetStorage = ['xz_panel_pos', 'xz_panel_size', 'xz_btn_pos'].every(function (key) { return !localStorage.getItem(key); });
+    result.textContent = JSON.stringify(state);
+    return;
+  }
+  if (state.mode === 'auto-progress' || state.mode === 'auto-progress-late-dom') {
+    document.getElementById('xz-btn-auto').click();
+    window.setTimeout(function () {
+      if (state.mode === 'auto-progress-late-dom') {
+        document.querySelector('.course-container').innerHTML = '<div class="page-item"><div class="page-name">第1页</div></div><div class="page-item"></div><div class="page-item"><div class="page-name active">\uE83D 专题三</div></div>';
+        document.getElementById('xz-btn-auto').click();
+      } else if (window.__mockLocation.acceptance.progressTwoPages) {
+        document.querySelectorAll('.page-item .page-name')[0].classList.remove('active');
+        document.querySelectorAll('.page-item .page-name')[1].classList.add('active');
+        document.getElementById('xz-btn-auto').click();
+      }
+      const track = document.getElementById('xz-auto-bar').parentElement;
+      state.progressText = document.getElementById('xz-auto-progress-text').textContent;
+      state.progressWidth = document.getElementById('xz-auto-bar').style.width;
+      state.progressNow = track.getAttribute('aria-valuenow');
+      state.progressMax = track.getAttribute('aria-valuemax');
+      state.chapterRequests = state.requests.filter(function (r) { return r.url.includes('/uaapi/wholepage/chapter/stu/'); }).length;
+      state.pageItems = document.querySelectorAll('.page-item').length;
+      state.activeItems = document.querySelectorAll('.page-item .page-name.active').length;
+      state.route = window.__mockLocation.search;
+      result.textContent = JSON.stringify(state);
+    }, 500);
+    return;
+  }
+  if (state.mode === 'pill-interaction') {
+    const panel = document.getElementById('xz-panel');
+    const auto = panel.querySelector('.xz-capsule-nav [data-goto="auto"]');
+    const reading = panel.querySelector('.xz-capsule-nav [data-goto="reading"]');
+    const advanced = panel.querySelector('#xz-advanced');
+    state.initialView = panel.dataset.view;
+    state.advancedClosed = !advanced.open;
+    advanced.querySelector('summary').click();
+    state.advancedOpened = advanced.open;
+    document.getElementById('xz-btn-auto').click();
+    state.autoIndicator = auto.classList.contains('is-running');
+    reading.click();
+    state.readingSelected = reading.getAttribute('aria-pressed') === 'true' && panel.dataset.view === 'reading';
+    state.readingDockVisible = getComputedStyle(document.getElementById('xz-reading-dock')).display !== 'none';
+    document.getElementById('xz-btn-reading').click();
+    state.autoPausedOnReading = document.getElementById('xz-btn-auto').textContent === '开始自动刷课';
+    state.readingStarted = document.getElementById('xz-btn-reading').textContent === '暂停计时';
+    auto.click();
+    document.getElementById('xz-btn-auto').click();
+    state.readingPausedOnAuto = document.getElementById('xz-btn-reading').textContent === '开始计时';
+    state.autoRestarted = auto.classList.contains('is-running');
+    result.textContent = JSON.stringify(state);
+    return;
+  }
   if (state.mode === 'log-copy') {
-    document.querySelector('.tab[data-tab="auto"]').click();
+    document.querySelector('.xz-capsule-nav [data-goto="auto"]').click();
     document.getElementById('xz-btn-auto').click();
     window.setTimeout(function () {
       state.logCollapsed = document.getElementById('xz-log-body').style.display === 'none';
@@ -278,7 +450,7 @@ window.addEventListener('load', function () {
       page += 1;
       window.setTimeout(function () { renderPage(page); }, 20);
     }, true);
-    document.querySelector('.tab[data-tab="auto"]').click();
+    document.querySelector('.xz-capsule-nav [data-goto="auto"]').click();
     document.getElementById('xz-btn-auto').click();
     window.setTimeout(function () {
       if (!state.completed) { state.timedOut = true; result.textContent = JSON.stringify(state); }
@@ -293,7 +465,7 @@ window.addEventListener('load', function () {
     const clockStart = Date.now();
     const perfStart = performance.now();
     Date.now = function () { return clockStart + (performance.now() - perfStart) * 13; };
-    document.querySelector('.tab[data-tab="auto"]').click();
+    document.querySelector('.xz-capsule-nav [data-goto="auto"]').click();
     document.getElementById('xz-btn-auto').click();
     let ticks = 0;
     const poll = window.setInterval(function () {
@@ -351,7 +523,7 @@ window.addEventListener('load', function () {
         item.querySelector('.page-name').textContent = '第' + page + '页';
       }, 20);
     }, true);
-    document.querySelector('.tab[data-tab="reading"]').click();
+    document.querySelector('.xz-capsule-nav [data-goto="reading"]').click();
     document.getElementById('xz-rd-h').value = '0';
     document.getElementById('xz-rd-m').value = '0';
     document.getElementById('xz-rd-s').value = '1';
@@ -360,7 +532,7 @@ window.addEventListener('load', function () {
     const poll = window.setInterval(function () {
       ticks += 1;
       const pages = Number(document.getElementById('xz-rd-pages').textContent);
-      const stopped = document.getElementById('xz-btn-reading').textContent === '开始挂机';
+      const stopped = document.getElementById('xz-btn-reading').textContent === '开始计时';
       if ((['reading-sequence','reading-summary'].indexOf(state.mode)>=0 && pages >= 5) || (state.mode === 'reading-noop' && stopped) || ticks > 900) {
         window.clearInterval(poll);
         state.timedOut = ticks > 900;
@@ -388,7 +560,7 @@ window.addEventListener('load', function () {
     }, 20);
     return;
   }
-  if (['navigation', 'navigation-noop', 'navigation-transient', 'auto-samples', 'auto-failure', 'auto-page-switch', 'auto-completed', 'auto-pause-pending'].indexOf(state.mode) >= 0) {
+  if (['navigation', 'navigation-noop', 'navigation-transient', 'navigation-delayed-scan', 'navigation-preload-error', 'navigation-slow-transition', 'auto-samples', 'auto-double', 'auto-staged', 'auto-duplicate-ids', 'auto-staged-duplicate-ids', 'auto-delayed-duplicate-ids', 'auto-slow-duplicate-submit', 'auto-completed-hidden-duplicate', 'auto-failure', 'auto-page-switch', 'auto-completed', 'auto-pause-pending', 'auto-alert-modal'].indexOf(state.mode) >= 0) {
     const nextButton = document.querySelector('.next-page-btn');
     if(state.mode==='auto-completed'&&nextButton)nextButton.addEventListener('click',function(){
       state.completedPageClicks=(state.completedPageClicks||0)+1;
@@ -401,6 +573,7 @@ window.addEventListener('load', function () {
       let activeIndex = 0;
       nextButton.addEventListener('click', function () {
         state.navigationClickAt = performance.now();
+        if (!state.firstNextAt) state.firstNextAt = performance.now();
         state.navigationClickCount = (state.navigationClickCount || 0) + 1;
         if (state.mode === 'navigation-noop') return;
         if (state.mode === 'navigation-transient') {
@@ -412,18 +585,86 @@ window.addEventListener('load', function () {
           }, 700);
           return;
         }
+        if (state.mode === 'navigation-slow-transition') {
+          window.setTimeout(function () {
+            pages[0].querySelector('.page-name').classList.remove('active');
+            pages[1].querySelector('.page-name').classList.add('active');
+            state.activePage = 1;
+          }, 16000);
+          return;
+        }
         pages[activeIndex].querySelector('.page-name').classList.remove('active');
         activeIndex += 1;
         pages[activeIndex].querySelector('.page-name').classList.add('active');
         state.activePage = activeIndex;
       });
     }
-    const submitButton = document.querySelector('.btn-submit');
-    if (submitButton) submitButton.addEventListener('click', function () { state.submitCount += 1; });
-    const autoTab = document.querySelector('.tab[data-tab="auto"]');
+    document.querySelectorAll('.btn-submit').forEach(function (submitButton, index) {
+      submitButton.addEventListener('click', function () {
+        if (state.mode === 'auto-alert-modal' && submitButton.closest('#alertModal')) {
+          if ((submitButton.textContent || '').trim() === '留在本页') state.alertStayCount = (state.alertStayCount || 0) + 1;
+          if ((submitButton.textContent || '').trim() === '确定离开') state.alertLeaveCount = (state.alertLeaveCount || 0) + 1;
+          document.getElementById('alertModal').classList.remove('in');
+          return;
+      }
+      state.submitCount += 1;
+      state.submitOrder = state.submitOrder || [];
+      state.submitOrder.push(index + 1);
+      state.submitTimes = state.submitTimes || [];
+      state.submitTimes.push(performance.now());
+      const group = submitButton.closest('.exercise-group');
+      if (state.mode === 'auto-slow-duplicate-submit' && index === 0) {
+        state.firstGroupSubmitAt = performance.now();
+        window.setTimeout(function () {
+          (group || document).querySelectorAll('.question-wrapper').forEach(function (question) { question.classList.add('finished'); });
+          state.firstGroupCompletedAt = performance.now();
+        }, 1500);
+        window.setTimeout(function () {
+          const second = document.querySelector('.exercise-group[data-step="2"]');
+          if (second) {
+            second.style.display = 'block';
+            state.secondExerciseShownAt = performance.now();
+          }
+        }, 500);
+        return;
+      }
+      (group || document).querySelectorAll('.question-wrapper').forEach(function (question) { question.classList.add('finished'); });
+      if (state.mode === 'auto-delayed-duplicate-ids' && index === 0) {
+        state.firstGroupCompletedAt = performance.now();
+        window.setTimeout(function () {
+          const second = document.querySelector('.exercise-group[data-step="2"]');
+          if (second) {
+            second.style.display = 'block';
+            state.secondExerciseShownAt = performance.now();
+          }
+        }, 1800);
+        return;
+      }
+      if (['auto-staged','auto-staged-duplicate-ids'].indexOf(state.mode)>=0 && index === 0) document.querySelector('.exercise-group[data-step="2"]').style.display = 'block';
+      });
+    });
+    if(state.mode==='auto-completed-hidden-duplicate'){
+      window.setTimeout(function(){
+        const second=document.querySelector('.exercise-group[data-step="2"]');
+        if(second){second.style.display='block';state.secondExerciseShownAt=performance.now();}
+      },1200);
+    }
+    const autoTab = document.querySelector('.xz-capsule-nav [data-goto="auto"]');
     if (autoTab) autoTab.click();
     const start = document.getElementById('xz-btn-auto');
     if (start) start.click();
+    if(state.mode==='navigation-delayed-scan'){
+      const scanSample=window.setInterval(function(){
+        const track=document.querySelector('#xz-auto-bar').parentElement;
+        if(track.getAttribute('aria-label')==='课程内容预读进度'&&Number(track.getAttribute('aria-valuemax'))>0){
+          state.preloadText=document.querySelector('#xz-auto-progress-text').textContent;
+          state.preloadNow=track.getAttribute('aria-valuenow');
+          state.preloadMax=track.getAttribute('aria-valuemax');
+          state.preloadLabel=track.getAttribute('aria-label');
+          window.clearInterval(scanSample);
+        }
+      },25);
+    }
     if (state.mode === 'auto-page-switch') {
       window.setTimeout(function () {
         window.__mockLocation.href += '&page-switch=2';
@@ -440,7 +681,7 @@ window.addEventListener('load', function () {
         if(stop)stop.click();
         state.pauseRequestedAt=performance.now();
       }
-      if (state.mode === 'navigation' && state.navigationDurations.length >= 20) {
+      if (state.mode.indexOf('navigation') === 0 && state.navigationDurations.length >= 20) {
         if (!state.pauseRequestedAt) {
           const stop = document.getElementById('xz-btn-auto');
           if (stop && stop.textContent.indexOf('暂停') === 0) stop.click();
@@ -451,6 +692,9 @@ window.addEventListener('load', function () {
         state.navigationClickCount = state.navigationClickCount || 0;
         state.navigationWithin15Seconds = state.navigationDurations.filter(function (ms) { return ms <= 15000; }).length;
         state.activePageText = document.querySelector('.page-name.active') && document.querySelector('.page-name.active').textContent.trim();
+        state.progressText = document.getElementById('xz-auto-progress-text') && document.getElementById('xz-auto-progress-text').textContent;
+        state.progressNow = document.getElementById('xz-auto-bar').parentElement.getAttribute('aria-valuenow');
+        state.progressMax = document.getElementById('xz-auto-bar').parentElement.getAttribute('aria-valuemax');
         state.timedOut = false;
         window.clearInterval(pollAuto);
         result.textContent = JSON.stringify(state);
@@ -458,18 +702,32 @@ window.addEventListener('load', function () {
       }
       const failed = state.logs.some(function (line) { return line.indexOf('处理失败 [阶段:') >= 0; });
       const navigationFailed = ['navigation-noop', 'navigation-transient'].indexOf(state.mode) >= 0 && state.logs.some(function (line) { return line.indexOf('翻页失败 [阶段: 翻页确认]') >= 0; });
+      const slowNavigationConfirmed=state.mode==='navigation-slow-transition'&&state.navigationDurations.length>=1;
       const pageSwitchReset = state.mode === 'auto-page-switch' && state.logs.some(function (line) { return line.indexOf('检测到页面切换，重置状态') >= 0; });
       const completedPageMoved=state.mode==='auto-completed'&&state.logs.some(function(line){return line.indexOf('翻页已确认')>=0;});
       const pendingPaused=state.mode==='auto-pause-pending'&&state.pauseRequestedAt&&performance.now()-state.pauseRequestedAt>1100;
+      const preloadFailed=state.mode==='navigation-preload-error'&&state.logs.some(function(line){return line.indexOf('全课预读失败，自动学习已暂停')>=0;});
+      const alertHandled=state.mode==='auto-alert-modal'&&state.alertStayCount>0&&state.logs.some(function(line){return line.indexOf('当前页仍有')>=0;});
       const timeoutTicks = state.mode.indexOf('navigation') === 0 ? 1800 : 600;
-      if ((state.mode === 'auto-samples' && state.submitCount > 0) || (state.mode === 'auto-failure' && failed) || pageSwitchReset || completedPageMoved || pendingPaused || navigationFailed || ticks > timeoutTicks) {
+      if ((['auto-samples','auto-double','auto-staged','auto-duplicate-ids','auto-staged-duplicate-ids','auto-delayed-duplicate-ids','auto-slow-duplicate-submit','auto-completed-hidden-duplicate'].indexOf(state.mode)>=0 && state.submitCount >= (state.mode==='auto-samples'||state.mode==='auto-completed-hidden-duplicate'?1:2)) || (state.mode === 'auto-failure' && failed) || pageSwitchReset || completedPageMoved || pendingPaused || alertHandled || navigationFailed || slowNavigationConfirmed || preloadFailed || ticks > timeoutTicks) {
         state.timedOut = ticks > timeoutTicks;
         state.navigationCount = state.navigationDurations.length;
         state.navigationWithin15Seconds = state.navigationDurations.filter(function (ms) { return ms <= 15000; }).length;
         state.activePageText = document.querySelector('.page-name.active') && document.querySelector('.page-name.active').textContent.trim();
         state.navigationFailureLogs = state.logs.filter(function (line) { return line.indexOf('翻页失败 [阶段: 翻页确认]') >= 0; });
         state.failureLogs = state.logs.filter(function (line) { return line.indexOf('处理失败 [阶段:') >= 0; });
+        if(state.mode==='auto-alert-modal'){
+          state.alertLeaveCount=state.alertLeaveCount||0;
+          state.alertOpen=!!document.querySelector('#alertModal.in');
+          state.questionSubmitCount=state.submitCount;
+          state.pendingQuestionCount=document.querySelectorAll('.question-wrapper:not(.finished)').length;
+        }
         state.answerValues = Array.from(document.querySelectorAll('.answer-field')).map(function (field) { return field.isContentEditable ? field.textContent : field.value; });
+        if (['auto-duplicate-ids','auto-staged-duplicate-ids','auto-delayed-duplicate-ids','auto-slow-duplicate-submit','auto-completed-hidden-duplicate'].indexOf(state.mode)>=0) {
+          state.exerciseGroupPendingCounts = Array.from(document.querySelectorAll('.exercise-group')).map(function (group) {
+            return group.querySelectorAll('.question-wrapper:not(.finished)').length;
+          });
+        }
         state.selectedChoices = Array.from(document.querySelectorAll('.choice-item input:checked')).length;
         state.selectedJudgeButtons = document.querySelectorAll('.right-btn.selected, .wrong-btn.selected').length;
         window.clearInterval(pollAuto);
@@ -551,14 +809,42 @@ function renderQuestion(question) {
 }
 
 function renderAutoBody(config) {
+  if(config.mode==='locate-pending'||config.mode==='locate-replaced')return '<div class="course-container"><div class="page-item" id="page-1"><div class="page-name active complete">第1页</div></div><div class="page-item is-hide" id="page-2"><div class="page-name">第2页</div></div><div class="page-item" id="page-3"><div class="page-name">第3页</div></div></div>';
+  if(config.mode==='locate-unknown')return '<div class="course-container"><div class="page-item"><div class="page-name active">第1页</div></div><div class="page-item"><div class="page-name">第2页</div></div></div>';
+  if(config.mode==='auto-alert-modal')return '<div class="course-container"><div class="page-item"><div class="page-name active">第20页</div></div><section class="question-wrapper show-answer wrong"><div class="question-type-tag">单选题</div></section><div class="question-operation-area"><button type="button" class="btn-submit">提交</button></div><button type="button" class="next-page-btn">下一页</button><div id="alertModal" class="modal in"><div class="modal-operation"><button type="button" class="btn-submit">留在本页</button><button type="button" class="btn-hollow">确定离开</button></div></div></div>';
+  if(config.mode==='auto-progress-late-dom')return '<div class="course-container"><div class="page-item"><div class="page-name active">第1页</div></div></div>';
+  if(config.progressTwoPages)return '<div class="course-container"><div class="page-item"><div class="page-name active">\uE83D 专题一</div></div><div class="page-item"><div class="page-name">\uE83D 专题二</div></div></div>';
   if(config.mode==='auto-completed')return '<div class="course-container"><div class="page-item" id="page-1"><div class="page-name active">第1页</div></div><section class="question-wrapper finished show-answer right" id="questiondone"><div class="question-title">已完成题目</div><button type="button" class="btn-redo">重做</button></section><button type="button" class="next-page-btn">下一页</button></div>';
+  if(config.mode==='auto-double'||config.mode==='auto-staged'){
+    const secondStyle=config.mode==='auto-staged'?' style="display:none"':'';
+    return '<div class="course-container"><div class="page-item" id="page-731"><div class="page-name active">第1页</div></div>'+
+      '<div class="exercise-group" data-step="1">'+renderQuestion({id:'group-one',kind:'blank',typeTag:'填空题'})+'<button type="button" class="btn-submit">提交第一组</button></div>'+
+      '<div class="exercise-group" data-step="2"'+secondStyle+'>'+renderQuestion({id:'group-two',kind:'essay',typeTag:'简答题'})+'<button type="button" class="btn-submit">提交第二组</button></div>'+
+      '<button type="button" class="next-page-btn">下一页</button></div>';
+  }
+  if(config.mode==='auto-completed-hidden-duplicate'){
+    const questions=Array.from({length:20},(_,index)=>renderQuestion({id:String(16841366+index),kind:'essay',typeTag:'简答题',title:`已完成组题目 ${index+1}`,finished:true})).join('');
+    const pending=Array.from({length:20},(_,index)=>renderQuestion({id:String(16841366+index),kind:'essay',typeTag:'简答题',title:`待显示组题目 ${index+1}`})).join('');
+    return '<div class="course-container"><div class="page-item" id="page-731"><div class="page-name active">第1页</div></div>'+
+      '<div class="page-element exercise-group" data-step="1">'+questions+'<div class="question-operation-area"><button type="button" class="btn-submit" style="display:none">已提交第一组</button></div></div>'+
+      '<div class="page-element exercise-group" data-step="2" style="display:none">'+pending+'<div class="question-operation-area"><button type="button" class="btn-submit">提交第二组</button></div></div>'+
+      '<button type="button" class="next-page-btn">下一页</button></div>';
+  }
+  if(config.mode==='auto-duplicate-ids'||config.mode==='auto-staged-duplicate-ids'||config.mode==='auto-delayed-duplicate-ids'||config.mode==='auto-slow-duplicate-submit'){
+    const questions=Array.from({length:20},(_,index)=>renderQuestion({id:String(16841366+index),kind:'essay',typeTag:'简答题',title:`练习题 ${index+1}`})).join('');
+    const secondStyle=['auto-staged-duplicate-ids','auto-delayed-duplicate-ids','auto-slow-duplicate-submit'].indexOf(config.mode)>=0?' style="display:none"':'';
+    return '<div class="course-container"><div class="page-item" id="page-731"><div class="page-name active">第1页</div></div>'+
+      '<div class="page-element exercise-group" data-step="1">'+questions+'<div class="question-operation-area"><button type="button" class="btn-submit">提交第一组</button></div></div>'+
+      '<div class="page-element exercise-group" data-step="2"'+secondStyle+'>'+questions+'<div class="question-operation-area"><button type="button" class="btn-submit">提交第二组</button></div></div>'+
+      '<button type="button" class="next-page-btn">下一页</button></div>';
+  }
   if (['reading-sequence','reading-noop','reading-summary'].indexOf(config.mode)>=0) {
     return '<div class="course-container"><div class="page-item" id="page-1"><div class="page-name active">第1页</div></div><button type="button" class="next-page-btn">下一页</button>'+(config.mode==='reading-summary'?'<button type="button" class="btn-submit">提交题目</button>':'')+'</div>';
   }
   if (['video-sequence', 'video-summary', 'video-stall'].indexOf(config.mode) >= 0) {
     return '<div class="course-container"><div class="page-item" id="page-1"><div class="page-name active">第1页</div></div><video style="display:none"></video><video data-active="true"></video><button type="button" class="next-page-btn">下一页</button></div>';
   }
-  if (['navigation', 'navigation-noop', 'navigation-transient'].indexOf(config.mode) >= 0) {
+  if (['navigation', 'navigation-noop', 'navigation-transient', 'navigation-delayed-scan', 'navigation-preload-error', 'navigation-slow-transition'].indexOf(config.mode) >= 0) {
     const pages = Array.from({ length: 21 }, (_, index) => `<div class="page-item" id="page-${index + 1}"><div class="page-name${index === 0 ? ' active' : ''}">第${index + 1}页</div></div>`).join('');
     return `<div class="course-container">${pages}<button type="button" class="next-page-btn">下一页</button></div>`;
   }
@@ -587,8 +873,8 @@ function runChrome(host, pagePath, options = {}) {
     acceptance: options.acceptance || { mode: 'export' }
   };
   const wrappedSource = '(function(location){\n' + source + '\n})(window.__mockLocation);';
-  const autoMode = mockLocation.acceptance && ['navigation', 'navigation-noop', 'navigation-transient', 'auto-samples', 'auto-failure', 'auto-page-switch', 'auto-completed', 'auto-pause-pending', 'video-sequence', 'video-summary', 'video-stall', 'reading-sequence', 'reading-summary', 'reading-noop', 'log-copy'].indexOf(mockLocation.acceptance.mode) >= 0;
-  const bodyMarkup = autoMode ? renderAutoBody(mockLocation.acceptance) : '';
+  const autoMode = mockLocation.acceptance && ['navigation', 'navigation-noop', 'navigation-transient', 'navigation-delayed-scan', 'navigation-preload-error', 'navigation-slow-transition', 'auto-samples', 'auto-double', 'auto-staged', 'auto-duplicate-ids', 'auto-staged-duplicate-ids', 'auto-delayed-duplicate-ids', 'auto-slow-duplicate-submit', 'auto-completed-hidden-duplicate', 'auto-failure', 'auto-page-switch', 'auto-completed', 'auto-pause-pending', 'auto-alert-modal', 'auto-progress', 'auto-progress-late-dom', 'video-sequence', 'video-summary', 'video-stall', 'reading-sequence', 'reading-summary', 'reading-noop', 'log-copy', 'locate-pending', 'locate-unknown', 'locate-replaced'].indexOf(mockLocation.acceptance.mode) >= 0;
+  const bodyMarkup = autoMode ? renderAutoBody(mockLocation.acceptance) : mockLocation.acceptance.lmsTextbookId ? '<button data-bind="click: $component.learnChapter">继续学习</button>' : '';
   const duplicateScriptTag = options.duplicateScript ? '<script src="userscript-duplicate.js"></script>' : '';
   const html = `<!doctype html><html><head><meta charset="utf-8">
 <script>window.__mockLocation=${JSON.stringify(mockLocation)};</script>
@@ -614,7 +900,7 @@ ${duplicateScriptTag}
     args.splice(args.length - 1, 0, '--window-size=1280,800', `--screenshot=${path.resolve(options.screenshotPath)}`);
   }
   try {
-    const output = execFileSync(chromePath, args, { encoding: 'utf8', timeout: options.timeout || 30000, maxBuffer: 8 * 1024 * 1024, windowsHide: true });
+    const output = execFileSync(chromePath, args, { encoding: 'utf8', timeout: options.timeout || 30000, maxBuffer: 32 * 1024 * 1024, windowsHide: true });
     const match = output.match(/<pre id="acceptance-result">([\s\S]*?)<\/pre>/);
     assert.ok(match, `Acceptance result missing from Chrome output:\n${output.slice(-1000)}`);
     return JSON.parse(match[1].replace(/&quot;/g, '"').replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>'));
@@ -628,67 +914,127 @@ ${duplicateScriptTag}
 
 test('userscript syntax and network permissions are declared', () => {
   execFileSync(process.execPath, ['--check', sourcePath], { encoding: 'utf8' });
-  assert.match(source, /^\/\/ @version\s+4\.1\.3$/m);
+  assert.match(source, /^\/\/ @version\s+4\.4\.11$/m);
+  const metadataIcon = source.match(/^\/\/ @icon\s+(data:image\/(?:png|svg\+xml);base64,[^\r\n]+)$/m);
+  const panelIcon = source.match(/var LOGO_URI = '(data:image\/(?:png|svg\+xml);base64,[^']+)';/);
+  assert.ok(metadataIcon && panelIcon, 'custom script and panel icons should be embedded');
+  assert.match(metadataIcon[1], /^data:image\/svg\+xml;base64,/);
+  assert.match(panelIcon[1], /^data:image\/png;base64,/);
   assert.match(source, /^\/\/ @connect\s+self$/m);
   assert.match(source, /^\/\/ @connect\s+api\.dgut\.edu\.cn$/m);
   assert.match(source, /^\/\/ @connect\s+api\.ulearning\.cn$/m);
 });
 
-test('all active v4.1.3 userscript copies are byte-identical', () => {
+test('all active v4.4.11 userscript copies are byte-identical', () => {
   const crypto = require('node:crypto');
   const activeCopies = [
     sourcePath,
-    path.join(root, '莞工小蟑螂-优学院全能助手 v4.1.3.user.js'),
+    path.join(root, '莞工小蟑螂-优学院全能助手 v4.4.11.user.js'),
     path.join(root, 'xz-ulearning-helper', '莞工小蟑螂-优学院全能助手.user.js'),
-    path.join(root, 'xz-ulearning-helper', '莞工小蟑螂-优学院全能助手 v4.1.3.user.js')
+    path.join(root, 'xz-ulearning-helper', '莞工小蟑螂-优学院全能助手 v4.4.11.user.js')
   ];
   const hashes = activeCopies.map(file => {
     const copy = fs.readFileSync(file, 'utf8');
-    assert.match(copy, /^\/\/ @version\s+4\.1\.3$/m, file);
+    assert.match(copy, /^\/\/ @version\s+4\.4\.11$/m, file);
     return crypto.createHash('sha256').update(copy, 'utf8').digest('hex');
   });
-  assert.ok(hashes.every(hash => hash === hashes[0]), `v4.1.3 copy hashes differ: ${hashes.join(', ')}`);
+  assert.ok(hashes.every(hash => hash === hashes[0]), `v4.4.11 copy hashes differ: ${hashes.join(', ')}`);
 });
 
-test('home recommends the current page action and returns cleanly to the start', () => {
+test('page locator skips locked pages, confirms native navigation, and never starts learning', () => {
+  const result = runChrome('ua.dgut.edu.cn', '/learnCourse/learnCourse.html?courseId=course-A', { acceptance: { mode: 'locate-pending' } });
+  assert.equal(result.activeIndex, 2);
+  assert.match(result.locateStatus, /已到第 3 页/);
+  assert.equal(result.autoStarted, false);
+  assert.deepEqual(result.errors, []);
+});
+
+test('page locator rebinds to a replaced page list and waits for stable active state', () => {
+  const result = runChrome('ua.dgut.edu.cn', '/learnCourse/learnCourse.html?courseId=course-A', { acceptance: { mode: 'locate-replaced' } });
+  assert.equal(result.activeIndex, 2);
+  assert.match(result.locateStatus, /已到第 3 页/);
+  assert.equal(result.autoStarted, false);
+  assert.deepEqual(result.errors, []);
+});
+
+test('page locator refuses to guess when the platform has no completion markers', () => {
+  const result = runChrome('ua.dgut.edu.cn', '/learnCourse/learnCourse.html?courseId=course-A', { acceptance: { mode: 'locate-unknown' } });
+  assert.equal(result.activeIndex, 0);
+  assert.match(result.locateStatus, /没有提供完成标记/);
+  assert.equal(result.autoStarted, false);
+  assert.deepEqual(result.errors, []);
+});
+
+test('seven taps reveal a reversible mascot easter egg without changing the icon', () => {
+  const result = runChrome('ua.dgut.edu.cn', '/learnCourse/learnCourse.html?courseId=course-A', { acceptance: { mode: 'easter' } });
+  assert.equal(result.hiddenBeforeSeventh, true);
+  assert.equal(result.openAfterSeventh, true);
+  assert.equal(result.messageChanged, true);
+  assert.equal(result.closed, true);
+  assert.equal(result.iconStable, true);
+  assert.equal(result.nativeCursors, true);
+  assert.deepEqual(result.errors, []);
+});
+
+test('capsule navigation opens the relevant function and returns from About', () => {
   const cases = [
-    ['ua.dgut.edu.cn', '/learnCourse/learnCourse.html?courseId=course-A', '课件学习页', '设置自动刷课', 'xz-sec-auto'],
-    ['lms.dgut.edu.cn', '/ulearning/index.html#/course/textbook?courseId=course-A', '课件目录页', '导出课件题库', 'xz-sec-export'],
-    ['lms.dgut.edu.cn', '/ulearning/index.html#/questionTrain/practice/111/222/1', '题库训练页', '导出训练题库', 'xz-sec-export']
+    ['ua.dgut.edu.cn', '/learnCourse/learnCourse.html?courseId=course-A', '课件学习页', 'auto', ['auto','export','reading']],
+    ['lms.dgut.edu.cn', '/ulearning/index.html#/course/textbook?courseId=course-A', '课件目录页', 'export', ['export']],
+    ['lms.dgut.edu.cn', '/ulearning/index.html#/questionTrain/practice/111/222/1', '题库训练页', 'export', ['export']]
   ];
   cases.forEach(function (entry, index) {
     const result = runChrome(entry[0], entry[1], {
       acceptance: { mode: 'ui-only' },
-      screenshotPath: index === 0 ? path.join(root, 'screenshots', 'v4.1-panel-learning.png') : undefined
+      screenshotPath: index === 0 ? path.join(root, 'screenshots', 'v4.4.11-acceptance-auto.png') : undefined
     });
     assert.equal(result.pageName, entry[2]);
-    assert.equal(result.primaryAction, entry[3]);
-    assert.equal(result.targetView, entry[4]);
-    assert.equal(result.backView, 'xz-sec-home');
-    assert.ok(result.layoutWidth >= 300 && result.layoutWidth <= 400);
+    assert.equal(result.initialView, entry[3]);
+    assert.equal(result.selectedView, entry[3]);
+    assert.deepEqual(result.availableViews, entry[4]);
+    assert.equal(result.aboutView, 'about');
+    assert.equal(result.returnView, entry[3]);
+    assert.ok(result.layoutWidth >= 300 && result.layoutWidth <= 430);
+    assert.ok(result.visibleCards >= 2);
     assert.deepEqual(result.errors, []);
   });
   const unknown = runChrome('lms.dgut.edu.cn', '/ulearning/index.html#/home', { acceptance: { mode: 'ui-only' } });
   assert.equal(unknown.pageName, '其他页面');
-  assert.equal(unknown.primaryAction, null);
-  assert.deepEqual(unknown.tabs, ['首页', '关于']);
+  assert.equal(unknown.initialView, 'home');
+  assert.deepEqual(unknown.availableViews, []);
   const autoPreview = runChrome('ua.dgut.edu.cn', '/learnCourse/learnCourse.html?courseId=course-A', {
-    acceptance: { mode: 'ui-only', previewTab: 'auto' },
-    screenshotPath: path.join(root, 'screenshots', 'v4.1-panel-auto.png')
+    acceptance: { mode: 'ui-only', previewTab: 'reading' },
+    screenshotPath: path.join(root, 'screenshots', 'v4.4.11-acceptance-reading.png')
   });
   const exportPreview = runChrome('lms.dgut.edu.cn', '/ulearning/index.html#/course/textbook?courseId=course-A', {
     acceptance: { mode: 'ui-only', previewTab: 'export' },
-    screenshotPath: path.join(root, 'screenshots', 'v4.1-panel-export.png')
+    screenshotPath: path.join(root, 'screenshots', 'v4.4.11-acceptance-export.png')
   });
-  assert.equal(autoPreview.previewView, 'xz-sec-auto');
+  assert.equal(autoPreview.previewView, 'xz-sec-reading');
   assert.equal(exportPreview.previewView, 'xz-sec-export');
-  assert.equal(autoPreview.activeTab, 'auto');
-  assert.equal(exportPreview.activeTab, 'export');
+  assert.equal(autoPreview.activeView, 'reading');
+  assert.equal(exportPreview.activeView, 'export');
   const darkPreview = runChrome('ua.dgut.edu.cn', '/learnCourse/learnCourse.html?courseId=course-A', {
     acceptance: { mode: 'ui-only', previewTab: 'auto', darkMode: true },
-    screenshotPath: path.join(root, 'screenshots', 'v4.1-panel-auto-dark.png')
+    screenshotPath: path.join(root, 'screenshots', 'v4.4.11-acceptance-dark.png')
   });
   assert.equal(darkPreview.darkMode, true);
+});
+
+test('capsule controls and fixed actions keep auto learning and reading mutually exclusive', () => {
+  const result = runChrome('ua.dgut.edu.cn', '/learnCourse/learnCourse.html?courseId=course-A', {
+    acceptance: { mode: 'pill-interaction' }
+  });
+  assert.equal(result.initialView, 'auto');
+  assert.equal(result.advancedClosed, true);
+  assert.equal(result.advancedOpened, true);
+  assert.equal(result.autoIndicator, true);
+  assert.equal(result.readingSelected, true);
+  assert.equal(result.readingDockVisible, true);
+  assert.equal(result.autoPausedOnReading, true);
+  assert.equal(result.readingStarted, true);
+  assert.equal(result.readingPausedOnAuto, true, JSON.stringify(result));
+  assert.equal(result.autoRestarted, true);
+  assert.deepEqual(result.errors, []);
 });
 
 test('six video pages continue when the page replaces videos and chapter containers', () => {
@@ -788,6 +1134,17 @@ test('DGUT urlStyle=2 uses the same-origin UA API proxy for directory and answer
   assert.deepEqual(result.errors, []);
 });
 
+test('DGUT LMS textbook view resolves the textbook ID before exporting', () => {
+  const result = runChrome('lms.dgut.edu.cn', '/ulearning/index.html#/course/textbook?courseId=lms-course-A', {
+    acceptance: { mode: 'export', lmsTextbookId: 'course-A', urlStyle2: true }
+  });
+  assert.equal(result.timedOut, false, JSON.stringify(result));
+  assert.ok(result.requests.some(request => request.url.includes('/uaapi/course/stu/course-A/directory')));
+  assert.ok(result.requests.every(request => !request.url.includes('/uaapi/course/stu/lms-course-A/directory')));
+  assert.equal(result.downloadQuestions.length, 1);
+  assert.deepEqual(result.errors, []);
+});
+
 test('a completed real-style question page advances without requesting or resubmitting an answer', () => {
   const result = runChrome('ua.dgut.edu.cn', '/learnCourse/learnCourse.html?courseId=course-A', {
     acceptance: { mode: 'auto-completed' }, virtualTimeBudget: 6000
@@ -795,7 +1152,7 @@ test('a completed real-style question page advances without requesting or resubm
   assert.equal(result.timedOut, false, JSON.stringify(result));
   assert.equal(result.completedPageClicks, 1);
   assert.equal(result.submitCount, 0);
-  assert.equal(result.requests.length, 0);
+  assert.equal(result.requests.filter(request => /\/questionAnswer\//.test(request.url)).length, 0);
   assert.ok(result.logs.some(line => line.includes('当前页题目已完成，跳过重复提交')));
   assert.deepEqual(result.errors, []);
 });
@@ -822,7 +1179,7 @@ test('standard ULearning course route uses api.ulearning.cn', () => {
 });
 
 test('LMS textbook hash route is treated as a course route and reads hash parameters', () => {
-  const result = runChrome('lms.dgut.edu.cn', '/ulearning/index.html#/course/textbook?courseId=hash-course&classId=hash-class');
+  const result = runChrome('lms.dgut.edu.cn', '/ulearning/index.html#/course/textbook?courseId=lms-hash-course&textbookId2=hash-course&classId=hash-class');
   assert.equal(result.timedOut, false, JSON.stringify(result));
   assert.equal(result.buttonText, '开始导出课件题库');
   assert.equal(new URL(result.requests[0].url).origin, 'https://api.dgut.edu.cn');
@@ -892,11 +1249,21 @@ test('request timeout retries within the configured limit and shows its stage', 
   assert.match(result.answerStatus, /获取课程目录失败: 请求超时/);
 });
 
-test('invalid JSON is visible and is not retried', () => {
+test('invalid JSON is visible after one same-origin fallback', () => {
   const result = runChrome('ua.dgut.edu.cn', '/learnCourse/learnCourse.html?courseId=course-A', { acceptance: { mode: 'invalid-json' } });
   assert.equal(result.downloadText, '');
-  assert.equal(result.requests.length, 1);
+  assert.equal(result.requests.length, 2);
   assert.match(result.answerStatus, /JSON解析失败/);
+  assert.deepEqual(result.errors, []);
+});
+
+test('HTTP 200 HTML from the old DGUT API falls back to the current same-origin proxy', () => {
+  const result = runChrome('lms.dgut.edu.cn', '/ulearning/index.html#/course/textbook?courseId=lms-course-A&textbookId2=course-A&classId=class-A', {
+    acceptance: { mode: 'html-fallback' }
+  });
+  const directoryHosts = result.requests.filter(request => request.url.includes('/directory')).map(request => new URL(request.url).hostname);
+  assert.deepEqual(directoryHosts, ['api.dgut.edu.cn', 'lms.dgut.edu.cn']);
+  assert.match(result.answerStatus, /完成|成功/);
   assert.deepEqual(result.errors, []);
 });
 
@@ -989,6 +1356,170 @@ test('auto-answer sample set fills 20 mixed questions without corrupting or trun
   assert.ok(result.answerValues.filter(value => value === expectedLong).length === 4);
   assert.equal(result.selectedChoices, 12);
   assert.equal(result.selectedJudgeButtons, 4);
+  assert.deepEqual(result.errors, []);
+});
+
+for (const mode of ['auto-double', 'auto-staged']) {
+  test(`${mode} answers and submits both exercise groups before advancing`, () => {
+    const result = runChrome('ua.dgut.edu.cn', '/learnCourse/learnCourse.html?courseId=mock-course', {
+      acceptance: {
+        mode,
+        answerResponses: {
+          'group-one': { correctAnswerList: ['第一组答案'] },
+          'group-two': { correctAnswerList: ['第二组完整简答'] }
+        }
+      },
+      virtualTimeBudget: 30000,
+      timeout: 45000
+    });
+    assert.equal(result.timedOut, false, JSON.stringify(result.logs && result.logs.slice(-15)));
+    assert.equal(result.submitCount, 2, JSON.stringify(result.logs && result.logs.slice(-15)));
+    assert.deepEqual(result.submitOrder, [1, 2]);
+    assert.deepEqual(result.answerValues, ['第一组答案', '第二组完整简答']);
+    assert.equal(result.failureLogs.length, 0, JSON.stringify(result.failureLogs));
+    assert.deepEqual(result.errors, []);
+  });
+}
+
+test('same question IDs in two page-element exercise groups fill both copies before each submit', () => {
+  const answerResponses = {};
+  const expectedAnswers = [];
+  for (let index = 0; index < 20; index += 1) {
+    const id = String(16841366 + index);
+    const answer = `简答答案${index + 1}`;
+    answerResponses[id] = { correctAnswerList: [answer] };
+    expectedAnswers.push(answer);
+  }
+  const result = runChrome('ua.dgut.edu.cn', '/learnCourse/learnCourse.html?courseId=mock-course', {
+    acceptance: { mode: 'auto-duplicate-ids', answerResponses },
+    virtualTimeBudget: 30000,
+    timeout: 45000
+  });
+  assert.equal(result.timedOut, false, JSON.stringify(result.logs && result.logs.slice(-15)));
+  assert.equal(result.requests.filter(request => /\/questionAnswer\//.test(request.url)).length, 20);
+  assert.equal(result.submitCount, 2, JSON.stringify(result.logs && result.logs.slice(-15)));
+  assert.deepEqual(result.submitOrder, [1, 2]);
+  assert.deepEqual(result.exerciseGroupPendingCounts, [0, 0]);
+  assert.deepEqual(result.answerValues, expectedAnswers.concat(expectedAnswers));
+  assert.equal(result.failureLogs.length, 0, JSON.stringify(result.failureLogs));
+  assert.deepEqual(result.errors, []);
+});
+
+test('a staged second exercise with reused IDs is detected and answered before it can be submitted', () => {
+  const answerResponses = {};
+  const expectedAnswers = [];
+  for (let index = 0; index < 20; index += 1) {
+    const id = String(16841366 + index);
+    const answer = `分阶段简答答案${index + 1}`;
+    answerResponses[id] = { correctAnswerList: [answer] };
+    expectedAnswers.push(answer);
+  }
+  const result = runChrome('ua.dgut.edu.cn', '/learnCourse/learnCourse.html?courseId=mock-course', {
+    acceptance: { mode: 'auto-staged-duplicate-ids', answerResponses },
+    virtualTimeBudget: 30000,
+    timeout: 45000
+  });
+  assert.equal(result.timedOut, false, JSON.stringify(result.logs && result.logs.slice(-15)));
+  assert.equal(result.requests.filter(request => /\/questionAnswer\//.test(request.url)).length, 40);
+  assert.equal(result.submitCount, 2, JSON.stringify(result.logs && result.logs.slice(-15)));
+  assert.deepEqual(result.submitOrder, [1, 2]);
+  assert.deepEqual(result.exerciseGroupPendingCounts, [0, 0]);
+  assert.deepEqual(result.answerValues, expectedAnswers.concat(expectedAnswers));
+  assert.equal(result.failureLogs.length, 0, JSON.stringify(result.failureLogs));
+  assert.deepEqual(result.errors, []);
+});
+
+test('a second exercise delayed after the first submit is answered before navigation resumes', () => {
+  const answerResponses = {};
+  const expectedAnswers = [];
+  for (let index = 0; index < 20; index += 1) {
+    const id = String(16841366 + index);
+    const answer = `延迟题组答案${index + 1}`;
+    answerResponses[id] = { correctAnswerList: [answer] };
+    expectedAnswers.push(answer);
+  }
+  const result = runChrome('ua.dgut.edu.cn', '/learnCourse/learnCourse.html?courseId=mock-course', {
+    acceptance: { mode: 'auto-delayed-duplicate-ids', answerResponses },
+    virtualTimeBudget: 30000,
+    timeout: 45000
+  });
+  assert.equal(result.timedOut, false, JSON.stringify(result.logs && result.logs.slice(-18)));
+  assert.equal(result.requests.filter(request => /\/questionAnswer\//.test(request.url)).length, 40);
+  assert.equal(result.submitCount, 2, JSON.stringify(result.logs && result.logs.slice(-18)));
+  assert.deepEqual(result.submitOrder, [1, 2]);
+  assert.ok(result.secondExerciseShownAt - result.firstGroupCompletedAt >= 1700);
+  assert.ok(result.submitTimes[1] >= result.secondExerciseShownAt);
+  assert.deepEqual(result.exerciseGroupPendingCounts, [0, 0]);
+  assert.deepEqual(result.answerValues, expectedAnswers.concat(expectedAnswers));
+  assert.equal(result.failureLogs.length, 0, JSON.stringify(result.failureLogs));
+  assert.deepEqual(result.errors, []);
+});
+
+test('a second submit waits until the first exercise group reports completion', () => {
+  const answerResponses = {};
+  const expectedAnswers = [];
+  for (let index = 0; index < 20; index += 1) {
+    const id = String(16841366 + index);
+    const answer = `顺序题组答案${index + 1}`;
+    answerResponses[id] = { correctAnswerList: [answer] };
+    expectedAnswers.push(answer);
+  }
+  const result = runChrome('ua.dgut.edu.cn', '/learnCourse/learnCourse.html?courseId=mock-course', {
+    acceptance: { mode: 'auto-slow-duplicate-submit', answerResponses },
+    virtualTimeBudget: 30000,
+    timeout: 45000
+  });
+  assert.equal(result.timedOut, false, JSON.stringify(result.logs && result.logs.slice(-18)));
+  assert.equal(result.requests.filter(request => /\/questionAnswer\//.test(request.url)).length, 40);
+  assert.equal(result.submitCount, 2, JSON.stringify(result.logs && result.logs.slice(-18)));
+  assert.deepEqual(result.submitOrder, [1, 2]);
+  assert.ok(result.secondExerciseShownAt < result.firstGroupCompletedAt, JSON.stringify(result));
+  assert.ok(result.secondGroupFirstAnswerAt >= result.firstGroupCompletedAt, JSON.stringify(result));
+  assert.ok(result.submitTimes[1] >= result.firstGroupCompletedAt);
+  assert.deepEqual(result.exerciseGroupPendingCounts, [0, 0]);
+  assert.deepEqual(result.answerValues, expectedAnswers.concat(expectedAnswers));
+  assert.equal(result.failureLogs.length, 0, JSON.stringify(result.failureLogs));
+  assert.deepEqual(result.errors, []);
+});
+
+test('a completed visible group does not hide a pending duplicate-ID group that appears later', () => {
+  const answerResponses = {};
+  const expectedAnswers = [];
+  for (let index = 0; index < 20; index += 1) {
+    const id = String(16841366 + index);
+    const answer = `已完成后续组答案${index + 1}`;
+    answerResponses[id] = { correctAnswerList: [answer] };
+    expectedAnswers.push(answer);
+  }
+  const result = runChrome('ua.dgut.edu.cn', '/learnCourse/learnCourse.html?courseId=mock-course', {
+    acceptance: { mode: 'auto-completed-hidden-duplicate', answerResponses },
+    virtualTimeBudget: 30000,
+    timeout: 45000
+  });
+  assert.equal(result.timedOut, false, JSON.stringify(result.logs && result.logs.slice(-18)));
+  assert.equal(result.requests.filter(request => /\/questionAnswer\//.test(request.url)).length, 20);
+  assert.equal(result.submitCount, 1, JSON.stringify(result.logs && result.logs.slice(-18)));
+  assert.deepEqual(result.submitOrder, [2]);
+  assert.ok(result.secondExerciseShownAt > 0);
+  assert.deepEqual(result.exerciseGroupPendingCounts, [0, 0]);
+  assert.deepEqual(result.answerValues.slice(20), expectedAnswers);
+  assert.equal(result.failureLogs.length, 0, JSON.stringify(result.failureLogs));
+  assert.deepEqual(result.errors, []);
+});
+
+test('unfinished-question leave prompt keeps the page open without submitting or leaving', () => {
+  const result = runChrome('ua.dgut.edu.cn', '/learnCourse/learnCourse.html?courseId=mock-course', {
+    acceptance: { mode: 'auto-alert-modal' },
+    virtualTimeBudget: 8000
+  });
+  assert.equal(result.timedOut, false, JSON.stringify(result.logs && result.logs.slice(-12)));
+  assert.equal(result.alertStayCount, 1, JSON.stringify(result.logs && result.logs.slice(-12)));
+  assert.equal(result.alertLeaveCount, 0);
+  assert.equal(result.questionSubmitCount, 0);
+  assert.equal(result.alertOpen, false);
+  assert.equal(result.pendingQuestionCount, 1);
+  assert.ok(result.logs.some(line => line.includes('检测到未完成题离页确认，留在当前页')));
+  assert.ok(result.logs.some(line => line.includes('当前页仍有 1 道未完成题目')));
   assert.deepEqual(result.errors, []);
 });
 
@@ -1133,6 +1664,69 @@ test('repeated initialization keeps one panel and MutationObserver restores a re
   assert.equal(result.errors.length, 0);
 });
 
+test('saved offscreen layout recovers, dragging stays visible, and reset clears layout', () => {
+  const result = runChrome('ua.dgut.edu.cn', '/learnCourse/learnCourse.html', {
+    acceptance: { mode: 'layout-recovery', storage: {
+      xz_panel_pos: JSON.stringify({ left: -6000, top: 9000 }),
+      xz_panel_size: JSON.stringify({ width: 500, height: 500 }),
+      xz_btn_pos: JSON.stringify({ left: 9000, top: -6000 })
+    } }
+  });
+  assert.equal(result.restoredPanelInside, true);
+  assert.equal(result.restoredToggleInside, true);
+  assert.equal(result.restoredWidth, 500);
+  assert.ok(result.resizedWidth > result.restoredWidth, JSON.stringify({before:result.restoredWidth,after:result.resizedWidth,height:result.resizedHeight,style:result.resizedStyle,errors:result.errors}));
+  assert.ok(result.resizedHeight > result.restoredHeight, JSON.stringify(result));
+  assert.equal(result.resizedStored, true);
+  assert.equal(result.draggedPanelInside, true);
+  assert.equal(result.draggedPanelRecovered, true, JSON.stringify(result));
+  assert.equal(result.toggleDraggedToEdgeInside, true, JSON.stringify(result));
+  assert.equal(result.toggleDragRecovered, true, JSON.stringify(result));
+  assert.equal(result.resetWidth, 412);
+  assert.equal(result.resetStorage, true);
+  assert.equal(result.errors.length, 0, JSON.stringify(result.errors));
+});
+
+test('auto progress reads course structure and shows a calibrated course position', () => {
+  for (const chapterId of ['item-A', 'unmatched-section']) {
+    const result = runChrome('ua.dgut.edu.cn', `/learnCourse/learnCourse.html?courseId=course-A&chapterId=${chapterId}&classId=class-A`, {
+      acceptance: { mode: 'auto-progress' }, virtualTimeBudget: 3000
+    });
+    assert.match(result.progressText, /课程位置 1\/1 页/, JSON.stringify({pageItems:result.pageItems,activeItems:result.activeItems,route:result.route}));
+    assert.match(result.progressText, /当前页「第1页」/);
+    assert.equal(result.progressWidth, '100%');
+    assert.equal(result.progressNow, '1');
+    assert.equal(result.progressMax, '1');
+    assert.equal(result.chapterRequests, 1);
+    assert.equal(result.errors.length, 0, JSON.stringify(result.errors));
+  }
+});
+
+test('whole-course progress follows the live active page after an asynchronous directory read', () => {
+  const result = runChrome('ua.dgut.edu.cn', '/learnCourse/learnCourse.html?courseId=course-A&classId=class-A', {
+    acceptance: { mode: 'auto-progress', progressTwoPages: true }, virtualTimeBudget: 3000
+  });
+  assert.match(result.progressText, /课程位置 2\/2 页/);
+  assert.match(result.progressText, /当前页「专题二」/);
+  assert.doesNotMatch(result.progressText, /\uE83D/);
+  assert.equal(result.progressNow, '2');
+  assert.equal(result.progressMax, '2');
+  assert.equal(result.progressWidth, '100%');
+  assert.equal(result.errors.length, 0, JSON.stringify(result.errors));
+});
+
+test('whole-course progress recalibrates when the full page list appears after pre-read', () => {
+  const result = runChrome('ua.dgut.edu.cn', '/learnCourse/learnCourse.html?courseId=course-A&classId=class-A', {
+    acceptance: { mode: 'auto-progress-late-dom', progressThreePages: true }, virtualTimeBudget: 3000
+  });
+  assert.match(result.progressText, /课程位置 3\/3 页/);
+  assert.match(result.progressText, /当前页「专题三」/);
+  assert.doesNotMatch(result.progressText, /\uE83D/);
+  assert.equal(result.progressNow, '3');
+  assert.equal(result.progressMax, '3');
+  assert.equal(result.errors.length, 0, JSON.stringify(result.errors));
+});
+
 test('auto flow observer resets state after a simulated SPA page change', () => {
   const result = runChrome('ua.dgut.edu.cn', '/learnCourse/learnCourse.html?courseId=mock-course', {
     acceptance: { mode: 'auto-page-switch' },
@@ -1143,17 +1737,65 @@ test('auto flow observer resets state after a simulated SPA page change', () => 
   assert.equal(result.errors.length, 0);
 });
 
-test('confirms 20 consecutive DOM page changes within the 15 second limit', () => {
+test('preloads every course chapter with bounded concurrency before first navigation', () => {
   const result = runChrome('ua.dgut.edu.cn', '/learnCourse/learnCourse.html?courseId=mock-course', {
-    acceptance: { mode: 'navigation' },
+    acceptance: { mode: 'navigation-delayed-scan', scanChapterCount: 4, chapterDelayMs: 1000 },
+    virtualTimeBudget: 45000,
+    timeout: 60000
+  });
+  assert.equal(result.timedOut, false, JSON.stringify(result.logs && result.logs.slice(-8)));
+  assert.equal(result.chapterRequestsCompleted, 4);
+  assert.equal(result.maxConcurrentChapterRequests, 3);
+  assert.ok(result.firstNextAt >= result.lastChapterResponseAt, JSON.stringify({firstNextAt:result.firstNextAt,lastChapterResponseAt:result.lastChapterResponseAt,completed:result.chapterRequestsCompleted}));
+  assert.match(result.preloadText, /读取课程内容中.*全课内容预读 [0-4]\/4 专题/);
+  assert.equal(result.preloadMax, '4');
+  assert.equal(result.preloadLabel, '课程内容预读进度');
+  assert.ok(result.logs.some(line => line.includes('全课预读完成，开始学习')));
+  assert.deepEqual(result.errors, []);
+});
+
+test('pauses automation without navigating when a full-course chapter pre-read fails', () => {
+  const result = runChrome('ua.dgut.edu.cn', '/learnCourse/learnCourse.html?courseId=mock-course', {
+    acceptance: { mode: 'navigation-preload-error' },
+    virtualTimeBudget: 10000,
+    timeout: 30000
+  });
+  assert.equal(result.timedOut, false, JSON.stringify(result.logs && result.logs.slice(-8)));
+  assert.equal(result.navigationClickCount || 0, 0);
+  assert.ok(result.logs.some(line => line.includes('课程进度读取失败')));
+  assert.ok(result.logs.some(line => line.includes('全课预读失败，自动学习已暂停')));
+  assert.deepEqual(result.errors, []);
+});
+
+test('slow platform page switch at 16 seconds is confirmed before retrying', () => {
+  const result = runChrome('ua.dgut.edu.cn', '/learnCourse/learnCourse.html?courseId=mock-course', {
+    acceptance: { mode: 'navigation-slow-transition' },
+    virtualTimeBudget: 25000,
+    timeout: 45000
+  });
+  assert.equal(result.navigationClickCount, 1);
+  assert.equal(result.navigationDurations.length, 1);
+  assert.ok(result.navigationDurations[0] >= 16000 && result.navigationDurations[0] < 20000, JSON.stringify(result.navigationDurations));
+  assert.equal(result.activePage, 1);
+  assert.equal(result.navigationFailureLogs.length, 0);
+  assert.deepEqual(result.errors, []);
+});
+
+test('confirms 20 consecutive DOM page changes within the navigation confirmation window', () => {
+  const result = runChrome('ua.dgut.edu.cn', '/learnCourse/learnCourse.html?courseId=mock-course', {
+    acceptance: { mode: 'navigation', scanChapterCount: 21 },
     virtualTimeBudget: 45000,
     timeout: 60000
   });
   assert.equal(result.timedOut, false, JSON.stringify(result.logs && result.logs.slice(-12)));
   assert.equal(result.navigationCount, 20);
   assert.equal(result.navigationClickCount, 20);
+  assert.equal(result.progressNow, '21');
+  assert.equal(result.progressMax, '21');
+  assert.match(result.progressText, /课程位置 21\/21 页 · 当前页「第21页」/);
   assert.ok(result.navigationWithin15Seconds >= 19, JSON.stringify(result));
   assert.equal(result.activePage, 20);
+  assert.ok(result.logs.filter(line => line.includes('翻页已确认')).every(line => /当前页「第\d+页」/.test(line)), JSON.stringify(result.logs.filter(line => line.includes('翻页已确认')).slice(0, 3)));
   assert.deepEqual(result.errors, []);
 });
 

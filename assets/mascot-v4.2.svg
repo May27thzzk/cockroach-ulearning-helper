@@ -1,0 +1,54 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" role="img" aria-label="抱着紫色笔记本的可爱小蟑螂">
+  <defs>
+    <linearGradient id="tile" x1="0" y1="0" x2="1" y2="1">
+      <stop stop-color="#fcf9ff"/>
+      <stop offset="1" stop-color="#ddd0fa"/>
+    </linearGradient>
+    <linearGradient id="shell" x1=".15" y1="0" x2=".85" y2="1">
+      <stop stop-color="#d79b6c"/>
+      <stop offset="1" stop-color="#a86142"/>
+    </linearGradient>
+    <linearGradient id="face" x1=".2" y1="0" x2=".8" y2="1">
+      <stop stop-color="#e5ae7d"/>
+      <stop offset="1" stop-color="#bf7950"/>
+    </linearGradient>
+    <linearGradient id="book" x1="0" y1="0" x2="1" y2="1">
+      <stop stop-color="#b09aee"/>
+      <stop offset="1" stop-color="#8268ca"/>
+    </linearGradient>
+    <filter id="shadow" x="-50%" y="-50%" width="200%" height="200%">
+      <feGaussianBlur stdDeviation="5"/>
+    </filter>
+  </defs>
+  <rect width="256" height="256" rx="60" fill="url(#tile)"/>
+  <path d="M20 82C26 39 61 15 107 17" fill="none" stroke="#fff" stroke-opacity=".58" stroke-width="10" stroke-linecap="round"/>
+  <ellipse cx="130" cy="218" rx="73" ry="12" fill="#7356ab" opacity=".14" filter="url(#shadow)"/>
+  <path d="M91 62C83 47 79 39 66 35M164 60C169 45 179 38 190 36" fill="none" stroke="#845344" stroke-width="8" stroke-linecap="round"/>
+  <circle cx="64" cy="34" r="8" fill="#a8684c"/>
+  <circle cx="192" cy="35" r="8" fill="#a8684c"/>
+  <ellipse cx="86" cy="185" rx="15" ry="25" transform="rotate(25 86 185)" fill="#ad6d4b"/>
+  <ellipse cx="170" cy="185" rx="15" ry="25" transform="rotate(-25 170 185)" fill="#ad6d4b"/>
+  <ellipse cx="91" cy="210" rx="16" ry="11" transform="rotate(-18 91 210)" fill="#92583f"/>
+  <ellipse cx="165" cy="210" rx="16" ry="11" transform="rotate(18 165 210)" fill="#92583f"/>
+  <ellipse cx="128" cy="165" rx="68" ry="60" fill="url(#shell)" stroke="#965a40" stroke-width="4"/>
+  <ellipse cx="128" cy="104" rx="72" ry="65" fill="url(#face)" stroke="#965a40" stroke-width="4"/>
+  <ellipse cx="128" cy="126" rx="53" ry="36" fill="#f2c697" opacity=".74"/>
+  <ellipse cx="102" cy="108" rx="12" ry="17" fill="#352a37"/>
+  <ellipse cx="154" cy="108" rx="12" ry="17" fill="#352a37"/>
+  <circle cx="98" cy="102" r="4" fill="#fff"/>
+  <circle cx="150" cy="102" r="4" fill="#fff"/>
+  <circle cx="106" cy="115" r="2" fill="#fff" opacity=".65"/>
+  <circle cx="158" cy="115" r="2" fill="#fff" opacity=".65"/>
+  <ellipse cx="82" cy="132" rx="11" ry="6" fill="#e68487" opacity=".62"/>
+  <ellipse cx="174" cy="132" rx="11" ry="6" fill="#e68487" opacity=".62"/>
+  <path d="M121 139Q128 147 135 139" fill="none" stroke="#70423e" stroke-width="4" stroke-linecap="round"/>
+  <g transform="rotate(-5 128 185)">
+    <rect x="85" y="157" width="86" height="64" rx="10" fill="#6a4da8"/>
+    <rect x="90" y="154" width="79" height="64" rx="9" fill="url(#book)" stroke="#7459b5" stroke-width="3"/>
+    <path d="M103 155V216" stroke="#d7cafa" stroke-width="4"/>
+    <path d="M120 178H150M120 189H143" stroke="#eee8ff" stroke-width="4" stroke-linecap="round" opacity=".85"/>
+    <path d="M137 167L139 173 145 175 139 177 137 183 134 177 128 175 134 173Z" fill="#fff4d7"/>
+  </g>
+  <ellipse cx="87" cy="179" rx="12" ry="8" transform="rotate(27 87 179)" fill="#dfa778" stroke="#9f6547" stroke-width="3"/>
+  <ellipse cx="169" cy="179" rx="12" ry="8" transform="rotate(-27 169 179)" fill="#dfa778" stroke="#9f6547" stroke-width="3"/>
+</svg>
