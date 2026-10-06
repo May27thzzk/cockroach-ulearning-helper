@@ -10,3 +10,10 @@ __pycache__/
 tests/__pycache__/
 tests/live_probe.py
 screenshots/live-probe.png
+
+# Local-only planning and review notes
+验收报告*.md
+**/验收报告*.md
+优化计划与验收清单.md
+**/优化计划与验收清单.md
+同类插件调研与功能设计.md
