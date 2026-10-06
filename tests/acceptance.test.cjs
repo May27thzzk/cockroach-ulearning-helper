@@ -919,7 +919,7 @@ test('userscript syntax and network permissions are declared', () => {
   const panelIcon = source.match(/var LOGO_URI = '(data:image\/(?:png|svg\+xml);base64,[^']+)';/);
   assert.ok(metadataIcon && panelIcon, 'custom script and panel icons should be embedded');
   assert.match(metadataIcon[1], /^data:image\/svg\+xml;base64,/);
-  assert.match(panelIcon[1], /^data:image\/png;base64,/);
+  assert.equal(panelIcon[1], metadataIcon[1], 'panel should reuse the existing embedded SVG icon');
   assert.match(source, /^\/\/ @connect\s+self$/m);
   assert.match(source, /^\/\/ @connect\s+api\.dgut\.edu\.cn$/m);
   assert.match(source, /^\/\/ @connect\s+api\.ulearning\.cn$/m);
